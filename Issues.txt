@@ -1,0 +1,48 @@
+Issue 1:
+Tasks are only corresponding to FPSO, Foundation And CSR why why following PBI/ task is showing in the list
+
+https://dev.azure.com/abs-eagle-engineering/Next-Gen-Eng-Apps/_workitems/edit/31346
+
+Separate Issue:
+Check if PBI is every put in the rework status - if that can be traced - this will be a separate task
+
+Issue 2:
+why this task is added as Design - https://dev.azure.com/abs-eagle-engineering/Next-Gen-Eng-Apps/_workitems/edit/35597
+
+Issue 3:
+Why this task is added as Design - https://dev.azure.com/abs-eagle-engineering/Next-Gen-Eng-Apps/_workitems/edit/35613
+
+Issue 4:
+Why all these tasks showing in FPSO
+FPSO	36110	Track Test and Report CSR TBHD Bugs	36111	Task	Run Tests and Report Bugs	John Streckfuss II
+FPSO	36156	Smoke Maintenance	36157	Task	Smoke Maintenance Week 1	John Streckfuss II
+FPSO	36156	Smoke Maintenance	36158	Task	Smoke Maintenance Week 2	John Streckfuss II
+FPSO	36170	Ship Model - Trans. BHD - Restrict Graphic Selection by Active Tab				
+FPSO	36175	Run, analyze, maintain and report results Weekly - Software Comments test suite (Sprint 103))	36176	Task	Run, analyze, maintain and report results Weekly - Software Comments test suite (Sprint 103) - Week 1	Albert Posthauer
+FPSO	36175	Run, analyze, maintain and report results Weekly - Software Comments test suite (Sprint 103))	36177	Task	Run, analyze, maintain and report results Weekly - Software Comments test suite (Sprint 103) - Week 2	Albert Posthauer
+FPSO	36188	Break Assessment and Evaluate out of CSR import scripts so they can be enabled seperately	36189	Task	Move assessment and evaluate out of main execution plan and add it below the import step so it can be enabled and disabled quickly without affecting the rest of the modeling	John Streckfuss II
+FPSO	36188	Break Assessment and Evaluate out of CSR import scripts so they can be enabled seperately	36203	Task	Add Sys.Desktop.Picture after assessment evaluate step to capture errors	John Streckfuss II
+FPSO	36188	Break Assessment and Evaluate out of CSR import scripts so they can be enabled seperately	36204	Task	Split Import Test summary into Modeling and Assessment Components	John Streckfuss II
+FPSO	36286	Fatigue - Integrate with GUI - For Tanker phase	35988	Task	Input DTO conversion - Convert Aft/Fwd end connection renewed info for Stiffener and Flat bar	Shanli Tang
+FPSO	36286	Fatigue - Integrate with GUI - For Tanker phase	36294	Task	Adjust Corrosion Margin & Cycle Based on	Shanli Tang
+FPSO	36286	Fatigue - Integrate with GUI - For Tanker phase	36325	Task	Set flag to Tanker Phase	Shanli Tang
+FPSO	36343	Setup all grids with graphics change notifications	36358	Task	PR Review - QA	Salina Hamal
+FPSO	36377	Draw Label in Side Frame				
+FPSO	36378	Draw Label in Cross Deck				
+FPSO	36379	Draw Label In Side Frame				
+FPSO	36393	MVR maintenance and updates	36394	Task	MVR maintenance and updates	Albert Posthauer
+
+Issue 5:
+This demo task should not be part of development - https://dev.azure.com/abs-eagle-engineering/Next-Gen-Eng-Apps/_workitems/edit/35527
+
+
+TODO:
+Added test - any bug should be assigned in the bug fixing category. 
+
+Code review task should be part of review category, but not design category
+
+Verifying each task showing in the fpso, foundation and CSR tab only shows task relevant to their teams. create a test which checks the file for reverifying it
+
+You need to make sure that you are only using the tasks for given query, and not creating your own query. Create a unit test that compares that tasks / bugs added in the sheet are only available for the query given, and not from outside
+
+May be we should have rules for AI - which can check the generated file for checking task title or bug title does not related to the categorization or specifying rules
