@@ -1,4 +1,4 @@
 localconfig
 __pycache__/
-Reports/*.xlsx
-Reports/~$*.xlsx
+*.xlsx
+~$*.xlsx
