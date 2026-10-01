@@ -11,7 +11,7 @@ which is why a Description column is included).
 ## Approach
 
 ### 1. Script location & language
-- Single Python script at `C:\Utilities\SprintTask\sprint_report.py`.
+- Main Python script at `C:\Utilities\SprintTask\sprint_tasks_from_queries.py`.
 - Uses `requests` (Azure DevOps REST API calls) and `openpyxl` (Excel output).
 - PAT is read from `AZURE_DEVOPS_PAT` when set, then from the local ignored `localconfig`
   file. If neither is available, it is entered interactively as plain visible text.
@@ -47,11 +47,16 @@ is stored — user pastes fresh URLs each run as requested.
   the `System.LinkTypes.Hierarchy-Forward` / `-Reverse` relations.
 
 **Query scope guarantee:**
+- A team tab can contain only work-item IDs returned by that team's supplied query;
+  there is no follow-up query that adds more IDs.
 - Fetch full details only for IDs returned by the supplied query (`$expand=relations`).
 - Group children under parent PBIs using each item's `System.Parent` field, but do not
   fetch additional children with a separate query.
 - Validate before writing that every PBI/Task/Bug ID in the report is present in the
   corresponding supplied query result.
+- Inclusion is intentionally stricter than query membership: a Task/Bug returned by the
+  query is skipped if its parent PBI is not also returned by that query. Unsupported
+  work-item types are ignored.
 - The CSR report records the user-confirmed reporting period as a note; it does not
   silently filter query results by dates.
 
@@ -123,7 +128,7 @@ Columns (per row = one Task/Bug under a PBI):
 13. Description (extra column, for future AI-assisted categorization review)
 
 ### 7. Tests and validation
-- `test_sprint_report.py` tests categorization rules, including review, demo, and bug
+- `test_sprint_tasks_from_queries.py` tests categorization rules, including review, demo, and bug
   handling.
 - Latest-report tests read the newest non-temporary workbook in `Reports/` and verify:
   - each PBI is assigned to only one team tab;

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-import sprint_report
+import sprint_tasks_from_queries as sprint_report
 
 
 REPORT_DIR = Path(__file__).parent / "Reports"

@@ -14,8 +14,14 @@ IMPORTANT: This script is READ-ONLY. It only issues HTTP GET requests and
 read-only WIQL query calls against the Azure DevOps REST API. It never
 creates, updates, or deletes anything in Azure DevOps.
 
+QUERY SCOPE: Report items are sourced only from the IDs returned by the
+user-supplied query for that team. The script does not add work items through
+an additional query. A Task/Bug is included only when its parent PBI is also
+returned by the same query; unparented/out-of-scope children are reported as
+skipped. A runtime scope validation rejects any emitted ID not in the query.
+
 Usage:
-    python sprint_report.py
+    python sprint_tasks_from_queries.py
 
 You will be prompted at the command prompt for:
      0. Your Azure DevOps Personal Access Token (PAT), unless the
