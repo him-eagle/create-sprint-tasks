@@ -1,266 +1,248 @@
 # PBI/Task Summary Report Generator — Plan
 
-## Problem
-Build a new, standalone Python script that takes an **already-generated**
-`PBI_Bug_Task_Report_*.xlsx` workbook (produced by the existing
-`pbi_bug_task_report.py` at `C:\Utilities\SprintTask\pbi_bug_task_report.py`) and fills
-in its empty **Summary** tab with a per-PBI rollup: story points, total completed-work
-hours, a category/hours/percentage breakdown, and an inline pie chart per PBI. The script
-must be read-only toward Azure DevOps (only used for live test verification, never for
-mutating the workbook's source data) and must never silently use fabricated data in its
-tests — all "live" tests re-query Azure DevOps for ground truth.
+## Goal
+Update the standalone summary utility so it reads a user-selected
+`PBI_Bug_Task_Report_*.xlsx` workbook and writes a **new output copy** with a flat,
+one-row-per-PBI table on a worksheet named exactly `Summary`. The layout, calculations,
+category order, and cell-color requirements are specified in this plan; they must not
+depend on a particular example workbook continuing to exist. PBI IDs and rows are always
+derived dynamically from the selected input report and verified against live Azure DevOps
+data.
 
-Confirmed from inspecting a real sample workbook
-(`C:\Utilities\SprintTask\Reports\Pbi_bug_tasks\PBI_Bug_Task_Report_103_20261001_104744.xlsx`):
-- Tabs: `Summary` (empty, 1x1), `All`, `FPSO`, `Foundation` (no CSR in this report type).
-- `All`/`FPSO`/`Foundation` row 1 = `Source URL:` label + hyperlinked team query URL.
-- Row 2 headers: `Team, PBI ID, PBI Title, PBI Story Points, PBI Done Date, Task ID,
-  Task Type, Task Title, Assigned To, State, Original Estimate (hrs),
-  Completed Work (hrs), Task Categorization, Done Date, Description`.
-- `PBI Story Points` already shows the literal string `No_Story_Point` when unset.
-- `Original Estimate (hrs)` / `Completed Work (hrs)` already show literal `No_Hours` when
-  unset (0 is preserved as a real value, not replaced).
+The original input workbook must never be modified. The script must not make Azure
+DevOps write requests. Existing report validation and live read-only test behavior remain
+unless explicitly changed below.
 
-## Decisions confirmed with user
-- New standalone script (does not modify `sprint_tasks_from_queries.py` or
-  `pbi_bug_task_report.py`); lives in this repo alongside the other report scripts.
-- "Total hours of PBI" = sum of **Completed Work (hrs)** across that PBI's Task/Bug rows
-  (treating `No_Hours` as 0).
-- Story Points are read directly from the existing `PBI Story Points` column in `All`
-  (already present in the real workbook) — no live ADO fetch needed to get them. **In the
-  Summary tab**, when the value is `No_Story_Point`, that cell is also highlighted
-  **yellow** (same treatment as the missing-hours cell) so missing story points are
-  visually flagged, not just as plain text.
-- Missing-hours note: when any underlying task/bug for a PBI had `No_Hours`, the **same
-  cell** as the total-hours number gets an appended note (e.g.
-  `"32 (some tasks/bugs missing hours)"`) and the cell fill is **yellow**.
-- Category breakdown layout: one **PBI header row** (ID/Title/Story Points/Total Hours)
-  followed by **one sub-row for every Task Categorization value in the fixed category
-  list** (`Bug Fixing`, `QA / Testing`, `Requirement Study`, `Review`,
-  `Design / Documentation`, `Development`) — **not just the categories that PBI
-  happens to have**. If a PBI has no tasks in a given category, that category's sub-row
-  still appears, with **Category Hours = 0** and **Category % = 0%**. The PBI's
-  ID/Title/Story Points/Total Hours cells are **vertically merged** across all of its
-  category sub-rows (always the same fixed count of sub-rows per PBI, one per category).
-  Each sub-row has: Task Categorization name, then **two separate columns** —
-  **"Category Hours"** and **"Category %"** (of that PBI's total) — as distinct cells,
-  not combined into one.
-- A PBI with **no Task/Bug children** gets a single row (ID/Title/Story Points/Total
-  Hours = 0), no category sub-rows, and no pie chart.
-- Pie chart: **one per PBI**, placed **inline to the right of that PBI's own row block**
-  (not a separate gallery section), with each slice labeled with both hours and
-  percentage. The chart plots only the **nonzero** categories for that PBI (a 0-hour
-  category contributes no visible slice); the fixed-category table rows above still list
-  every category including the 0-hour ones. No chart for PBIs with no children at all.
-- Validation: workbook must contain tabs `Summary`, `All`, `FPSO`, `Foundation` (error
-  otherwise). `Summary` must be empty — if it already has content, **abort with a clear
-  error** telling the user to supply a fresh/unprocessed report file.
-- The script itself (not just the test suite) scans `Assigned To` across
-  `All`/`FPSO`/`Foundation` before building the Summary. If any row is assigned to
-  **"Himanshu Pathak"**, the script **aborts** and prints the offending rows (sheet,
-  PBI ID, Task/Bug ID, title) with a message suggesting the user **remove those entries
-  from the workbook first, then re-run the script**. It does not silently skip/filter
-  them or proceed.
-- Input file name must match `PBI_Bug_Task_Report_*` (validated, not just conventionally
-  named) — reject other filenames with a clear error.
-- Output: a **new file**, original untouched. Filename = input name with `_Summary`
-  inserted **before the timestamp** component, e.g.
-  `PBI_Bug_Task_Report_103_Summary_<timestamp>.xlsx`, where `<timestamp>` is a **fresh
-  timestamp** taken when the summary script runs. Saved into
-  `C:\Utilities\SprintTask\Reports\Pbi_bug_tasks` (same folder convention as
-  `pbi_bug_task_report.py`'s output, regardless of where the input file itself was
-  read from; created automatically if missing).
+## Commands
 
-## Live tests requested (must hit real Azure DevOps, no mocked/fake data)
-1. Re-query each team's saved query (URL read from row 1 of `FPSO`/`Foundation` tabs) and
-   verify every PBI ID appearing in the `All` tab is actually returned by one of those
-   queries — on mismatch, report verbose reasoning (which query was checked, what it
-   returned, which PBI was expected and missing).
-2. Recompute each PBI's total Completed Work hours directly from a fresh query/fetch of
-   its Task/Bug children (treating missing hours as 0) and assert it matches the
-   Summary tab's total-hours value for that PBI.
-3. For every PBI that the Summary shows with **zero children** (no Task/Bug rows),
-   independently re-query Azure DevOps for that PBI's child work items and assert the
-   live result is indeed empty — confirms the "0 hours / no breakdown" case is real, not
-   a scope/fetch bug.
-4. Scan `Assigned To` across `All`/`FPSO`/`Foundation` tabs and assert **no** row is
-   assigned to **"Himanshu Pathak"** — report any violating rows (sheet, PBI ID, task ID,
-   title) if found. This mirrors the script's own pre-flight check: the test
-   independently verifies the same rule the script enforces at runtime.
-5. For every PBI/category sub-row in the Summary where **Category Hours = 0**,
-   independently cross-reference that PBI's rows in `All` (and the matching team tab —
-   `FPSO` or `Foundation`) and assert there is genuinely **no** Task/Bug row for that PBI
-   whose `Task Categorization` equals that category — i.e. confirm the 0 is real, not a
-   grouping/lookup bug, with verbose reasoning (PBI ID, category, rows inspected) on
-   failure.
-6. Plus standard unit tests (no ADO access) for: categorization passthrough, hours
-   summation/placeholder logic, story point passthrough, filename validation, tab
-   validation (including the "Summary must be empty" abort path), PBI-only row handling,
-   and output filename generation.
-7. Additional sensible test cases: category percentage math sums to ~100% per PBI,
-   merged-cell ranges are correct for multi-category PBIs, every PBI always has exactly
-   six category sub-rows (the fixed list), and each pie chart's slice count matches the
-   number of nonzero categories for that PBI.
+```powershell
+Set-Location C:\Utilities\SprintTask
+python .\pbi_bug_task_summary.py
+python -m unittest -v test_pbi_bug_task_summary
+python -m unittest discover -s . -p "test_*.py" -v
+```
 
-## Implementation outline
-1. **New script** `pbi_bug_task_summary.py`:
-   - Prompt for input file path; validate filename prefix `PBI_Bug_Task_Report_`.
-   - Load workbook with `openpyxl` (need formulas/formatting preserved for output, so
-     load normally — not `read_only` — since we must write a new workbook with charts).
-   - Validate required tabs exist and `Summary` is empty; abort with clear message
-     otherwise.
-   - Scan `Assigned To` across `All`/`FPSO`/`Foundation`; abort with offending-row detail
-     if "Himanshu Pathak" is found anywhere.
-   - Read `All` tab rows by header name (not fixed column index) for resilience.
-   - Group rows by PBI ID; compute total Completed Work hours (treating `No_Hours` as 0)
-     and a missing-hours flag; compute hours/percentage for each of the six fixed
-     categories (0 when absent).
-   - Write the Summary sheet: header row, then per-PBI merged blocks with six category
-     sub-rows each, yellow highlight on flagged Story Points/total-hours cells, and an
-     inline pie chart (openpyxl `PieChart`, nonzero categories only) anchored beside each
-     PBI's block.
-   - Save to a new output file in `C:\Utilities\SprintTask\Reports\Pbi_bug_tasks` (input
-     filename with `_Summary_<fresh timestamp>` inserted).
-2. **New test file** `test_pbi_bug_task_summary.py`:
-   - Pure unit tests using in-memory/fixture workbooks (built with openpyxl in a temp
-     file) — no ADO access.
-   - Live tests that read the real `PAT` via `AZURE_DEVOPS_PAT`/`localconfig` and the
-     query URLs embedded in a real generated report; skipped with a clear message when
-     no PAT or no report is available (same pattern as the existing test suites).
-3. Update `README.md` only if it already documents the sibling scripts (currently just a
-   title) — otherwise leave as-is to avoid unrelated doc churn.
+## Input workbook
 
-## Safety / read-only guarantee
-- The script only reads the input workbook and (in live tests only) issues read-only
-  Azure DevOps `GET`/WIQL calls. No Azure DevOps data is created, updated, or deleted,
-  and the original input workbook is never modified — all output goes to a new file.
+- Prompt for the input `.xlsx` path; do not hardcode the sample filename or PBI IDs.
+- Input is produced by `pbi_bug_task_report.py` and has `Summary`, `All`, `FPSO`, and
+  `Foundation` tabs.
+- Read report data from `All`, using column headers rather than fixed column positions.
+- Group source rows dynamically by PBI ID. Include PBIs present in the input, including a
+  PBI-only row when it has no Task/Bug rows.
+- Continue to validate the input filename prefix, required sheets, and that its existing
+  `Summary` sheet is empty before generating output.
+- Continue to reject the workbook if any relevant row is assigned to Himanshu Pathak,
+  using case/whitespace-insensitive matching and identifying the offending rows.
 
-## Implementation notes (post-build)
-- `pbi_bug_task_summary.py` and its tests (`test_pbi_bug_task_summary.py`) were added to
-  `C:\Utilities\SprintTask` alongside the existing scripts (confirmed location).
-- Ran the script against the real sample workbook
-  (`PBI_Bug_Task_Report_103_20261001_104744.xlsx`); verified the Summary tab's structure,
-  merged cells, yellow highlights, and pie charts render correctly.
-- Fixed a real openpyxl gotcha: `PatternFill(start_color="FFFF00", ...)` (6-digit hex)
-  stores an alpha of `00` (fully transparent) instead of `FF` (opaque) — the fill is
-  invisible in Excel unless the 8-digit ARGB form (`"FFFFFF00"`) is used.
-- `pbi_bug_task_report.py`'s own test suite (`test_pbi_bug_task_report.py`) globbed
-  `PBI_Bug_Task_Report_*.xlsx` in the shared `Reports\Pbi_bug_tasks` folder to find "the
-  latest report" — this incidentally matched the new script's
-  `PBI_Bug_Task_Report_<sprint>_Summary_<timestamp>.xlsx` output (whose Summary tab is
-  intentionally non-empty), causing a false failure in the sibling suite. Fixed by
-  excluding `_Summary_` from that glob in `test_pbi_bug_task_report.py`.
-- One live test (`test_pbis_shown_with_zero_children_are_genuinely_empty_live`) is
-  legitimately skipped against the current sample data, since that sample's PBIs all
-  have at least one Task/Bug child — there's no zero-children PBI to verify yet. It will
-  run automatically once a workbook with such a PBI is summarized.
+## Summary worksheet layout
 
-## Follow-up refinements (post-build)
-- **Consistent category colors:** each of the six fixed categories now has a dedicated
-  hex color (`CATEGORY_COLORS`), applied via an openpyxl `DataPoint`/`GraphicalProperties`
-  solid fill per pie-chart slice. Because every PBI's chart always lists the same six
-  categories in the same order, the same category renders in the exact same color on
-  every PBI's chart (e.g. "Development" is always green). An unexpected/unknown category
-  falls back to a small cycled palette (`FALLBACK_CATEGORY_COLORS`).
-- **Removed the chart legend:** the default legend box only added a generic "Series1"
-  entry and wasted space without identifying categories usefully. The legend is now
-  disabled (`chart.legend = None`); each slice's own data label instead shows the
-  category name, value, and percentage directly (`showCatName`/`showVal`/`showPercent`
-  all `True`), so the chart conveys the same information in less space.
-- **Category % cell now displays a "%" suffix:** the cell's underlying numeric value is
-  unchanged (e.g. `16.7`, not `0.167`), but a custom number format (`0.0"%"`) appends a
-  literal `%` character so it reads `16.7%` in Excel, instead of a bare, ambiguous
-  number. (A plain Excel percentage format was avoided since that would multiply the
-  stored value by 100 for display, which would have required dividing the value by 100
-  first — the custom-suffix format keeps the stored number intuitive for anything else
-  reading the sheet while still looking like a percentage.)
-- **Removed a stray "Series1" label from the pie charts:** even after removing the
-  legend, Excel was still rendering a "Series1" text label on the chart because the
-  data series was never explicitly told to suppress its series name
-  (`showSerName`) — its unset/`None` default does not reliably render as off in Excel.
-  Fixed by explicitly setting `chart.dataLabels.showSerName = False` (plus
-  `showLegendKey = False` and `showBubbleSize = False` for the same reason), verified
-  directly in the saved chart XML (`<showSerName val="0"/>`) and covered by a new test.
-- **Eliminated overlapping 0-value slice labels:** the pie chart's data/category
-  references previously spanned the full fixed six-category block, so a zero-hour
-  category (e.g. "Design / Documentation: 0, 0%") still produced a data label that
-  visually overlapped neighboring labels even though its slice had no visible wedge.
-  Fixed by writing each PBI's **nonzero-only** categories into a pair of hidden helper
-  columns (`CHART_HELPER_CATEGORY_COL` / `CHART_HELPER_HOURS_COL`, columns AX/AY,
-  `column_dimensions[...].hidden = True`) and building the chart's data/category
-  `Reference`s from that nonzero-only, contiguous range instead of the visible
-  six-row table. The visible category breakdown table (columns E/F/G) is unaffected
-  and still lists all six fixed categories, including zero-hour ones — only the chart
-  itself now omits them, so it only ever shows slices/labels for categories that
-  actually have hours.
-- **Regression: hiding the helper columns made every chart render completely empty.**
-  openpyxl/Excel charts default to "plot visible cells only"
-  (`chart.visible_cells_only` / OOXML `<plotVisOnly val="1"/>`). Since the chart's data
-  now lived entirely in the hidden helper columns introduced by the fix above, Excel
-  excluded all of it from the plot by default — every pie chart rendered with no
-  slices at all. **This was not caught by the existing unit tests**, because those
-  tests only inspect the openpyxl chart object model (data references, series,
-  colors, counts) — they confirm the XML/object structure is well-formed, but
-  openpyxl never actually renders a chart, so a "structurally valid but visually
-  empty in Excel" bug like this is invisible to that kind of test. Fixed by explicitly
-  setting `chart.visible_cells_only = False` on every chart created, and added a
-  regression test asserting this attribute directly so the specific setting is
-  pinned going forward (still can't substitute for actually opening the file in
-  Excel, which remains the authoritative check for visual rendering).
-- **Simplified slice labels to percentage-only:** each slice previously showed category
-  name + hours + percentage, which overlapped/looked cluttered for longer category
-  names (e.g. "Requirement Study", "Design / Documentation"). Since the adjacent,
-  always-visible category breakdown table (columns E/F/G) already lists the category
-  name and hours for every row, the chart's data labels now show only the percentage
-  (`showCatName`/`showVal` set to `False`, `showPercent` stays `True`) — consistent
-  category colors (see above) plus the adjacent table are enough to identify each
-  slice without repeating text on the chart itself.
-- **Re-added a compact bottom legend so a bare "75%" slice is still identifiable.**
-  Percentage-only labels made each slice's category ambiguous on its own, so a
-  `Legend(legendPos="b")` was added back (Excel resolves pie-chart legend entries from
-  the category reference at render time, so this correctly shows real category names,
-  not a repeat of the earlier "Series1" issue, which was specifically caused by
-  `showSerName` on data labels, not the legend). Chart height was bumped from 7cm to
-  8.5cm and `CHART_SPACER_ROWS` from 12 to 14 to make room for the legend without
-  overlapping the next PBI's block.
-- **Added a live-data regression test for the legend/category mapping.** Per explicit
-  request, `test_chart_legend_categories_match_live_recomputed_categorization`
-  (in `LatestSummaryLiveApiTests`) does not use dummy/fixture data: for each PBI with
-  children in the latest generated summary workbook, it independently re-fetches that
-  PBI's current child work items from Azure DevOps, recomputes each child's category
-  with the real `categorize_task` logic and its Completed Work hours from scratch, and
-  asserts the resulting nonzero-category set exactly matches the hidden helper-column
-  data that feeds that PBI's chart slices/legend. Requires a configured PAT and an
-  existing summary workbook; skipped with an explanation otherwise, like the other
-  live tests.
-- **Added a live-data test for the Category % math itself.**
-  `test_category_percentages_match_live_recomputation` verifies, for every PBI with
-  children, that the Summary's "Category %" value matches
-  `percent(category) = hours(category) / total_hours * 100` (0 when `total_hours == 0`,
-  rounded to 1 decimal) — the exact formula used in `summarize_pbis()`. Both
-  `hours(category)` and `total_hours` are recomputed from scratch from a fresh live
-  fetch of that PBI's current Task/Bug children (categorized with `categorize_task`,
-  hours via `hours_to_number`), not read from the "All" tab or anywhere else in the
-  workbook, so the check is independent of whatever the generator script itself wrote.
+Replace the existing multi-row-per-PBI category breakdown and inline pie charts with a
+flat table: exactly one output row per PBI, no charts, no category subrows, no merged
+PBI-cell blocks, no hidden chart-helper columns, and no chart spacer rows.
 
-## Execution steps
-1. **Generate the summary workbook:**
-   ```
-   cd C:\Utilities\SprintTask
-   python pbi_bug_task_summary.py
-   ```
-   Enter the path to an existing `PBI_Bug_Task_Report_*.xlsx` when prompted. Output is
-   written to `Reports\Pbi_bug_tasks\PBI_Bug_Task_Report_<sprint>_Summary_<timestamp>.xlsx`;
-   the input file is left untouched.
-2. **Run the tests** (after step 1, so file- and live-API-dependent tests execute
-   instead of skipping):
-   ```
-   cd C:\Utilities\SprintTask
-   pytest test_pbi_bug_task_summary.py -v
-   ```
-   or
-   ```
-   python -m unittest -v test_pbi_bug_task_summary
-   ```
-   Set `AZURE_DEVOPS_PAT` (or populate `localconfig`) beforehand so the live Azure
-   DevOps API checks run instead of being skipped.
+Use two header rows:
+
+- Row 1: merge and label `Effort` above the six category-effort columns; merge and label
+  `Percentage` above the six category-percentage columns.
+- Row 2: column labels in this order:
+
+1. PBI ID
+2. PBI Title
+3. PBI Story Points
+4. Total Hours
+5. Bug Fixing (under Effort)
+6. QA / Testing (under Effort)
+7. Requirement Study (under Effort)
+8. Review (under Effort)
+9. Design / Documentation (under Effort)
+10. Development (under Effort)
+11. Bug Fixing (under Percentage)
+12. QA / Testing (under Percentage)
+13. Requirement Study (under Percentage)
+14. Review (under Percentage)
+15. Design / Documentation (under Percentage)
+16. Development (under Percentage)
+
+The Summary worksheet name must be exactly `Summary`. Do not create a separate tab per
+person or use a person's name as the Summary tab name. Ignore such names in the sample
+workbook; it is only a reference for the requested format.
+
+## Calculations and display
+
+- PBI ID, PBI Title, and PBI Story Points come from the PBI fields already repeated in
+  the input `All` tab. Preserve the PBI hyperlink when present.
+- `Total Hours` is the sum of `Completed Work (hrs)` for all Task/Bug rows belonging to
+  that PBI. Treat `No_Hours`, blank, and missing values as zero for arithmetic, while
+  retaining a flag indicating that one or more task values were missing.
+- Each Effort category value is the sum of Completed Work for that PBI's Task/Bug rows
+  whose `Task Categorization` exactly matches that category.
+- The six fixed categories and their display order are:
+  `Bug Fixing`, `QA / Testing`, `Requirement Study`, `Review`,
+  `Design / Documentation`, `Development`.
+- Each Percentage cell is `category effort / Total Hours * 100`. If Total Hours is zero,
+  every category percentage is zero. Display percentages consistently to one decimal
+  place (e.g. `5.9%`, `0.0%`). For positive totals, category percentages should add to
+  approximately 100%, allowing only for rounding.
+- If any task hours are missing, retain the numeric total and add a visible note to that
+  PBI's Total Hours cell, e.g. `35.5 (some tasks/bugs missing hours)`, and highlight it
+  yellow. Do not treat an explicit numeric zero as missing.
+- Preserve `No_Story_Point` when story points are absent and highlight that cell yellow.
+- Fill the complete `A1:D2` header block dark blue (`FF002060`, RGB `#002060`) with bold white text
+  (`FFFFFFFF`); retain visible borders around every cell in the block.
+- Fill the complete `E1:J2` Effort block dark red (`FF9C0006`, RGB `#9C0006`) with bold
+  white text (`FFFFFFFF`); retain visible borders around every cell in the block.
+- Fill the complete `K1:P2` Percentage block dark blue (`FF002060`, RGB `#002060`) with
+  bold white text (`FFFFFFFF`); retain visible borders around every cell in the block.
+- Draw visible thin gray borders around every grouped header, column header, and data cell
+  in the Summary table. Use the fixed color `FF808080` for the border lines.
+- Match the Summary header/section/cell color scheme used by the approved reference sheets.
+  Before implementation, inspect those sheets and record the exact ARGB values and their
+  uses in a color specification (group-header fill, column-header fill, missing-data
+  fill, font color, and borders). Implement the colors as named constants and test those
+  exact values. Tests must not need to reopen the reference workbook to know expectations.
+- A PBI with no child Task/Bug rows gets one row, Total Hours 0, and zero effort and
+  percentage in every category.
+- If a Task/Bug has an unexpected category not in the six fixed categories, do not
+  silently drop its hours. Fail with a clear error identifying the PBI, Task/Bug ID,
+  title, and unexpected category so the category list or source report can be reviewed.
+- If category effort does not reconcile with Total Hours, treat it as a validation error
+  and identify the PBI and contributing rows. Do not silently alter the source or
+  manufacture balancing effort.
+
+## Output and safety
+
+- Save a new workbook in `Reports/Pbi_bug_tasks/`, creating the directory if necessary.
+- Keep the source workbook untouched.
+- Use the existing output naming convention: insert `_Summary_<fresh timestamp>` before
+  the `.xlsx` extension, replacing an existing trailing timestamp when present.
+- Keep local PAT handling and the Himanshu Pathak safety check as currently implemented.
+- No pie charts, graph data, or workbook formulas are required for this flat summary.
+
+## Unit-test changes
+
+Update `test_pbi_bug_task_summary.py` to match the flat layout. Tests should use generated
+in-memory/temporary workbooks and dynamic IDs; do not depend on the sample's fixed PBI
+IDs except in a clearly named optional sample-regression test.
+
+Required pure unit tests:
+
+1. Summary worksheet is named `Summary` and has the two-row grouped header structure.
+2. The exact 16 column labels and category ordering are correct.
+3. Exactly one Summary data row is written for each unique PBI in `All`.
+4. PBI ID, title, story points, and hyperlink are preserved.
+5. Total Hours sums Completed Work, treating `No_Hours`/blank as zero and explicit zero
+   as present data.
+6. Missing-hours note and yellow fill appear only when one or more task values are
+   missing; `No_Story_Point` is preserved and highlighted.
+7. Category effort values aggregate to the correct category columns, with zeros for
+   absent categories.
+8. Category percentages use Total Hours as the denominator, use zero when total is zero,
+   and sum to approximately 100% for positive totals.
+9. A PBI without children still gets one row with zero totals/category values.
+10. Unknown categories and any total/category reconciliation mismatch fail clearly and
+    identify the relevant PBI/task rather than silently dropping data.
+11. No charts, merged data blocks, spacer rows, or hidden helper columns are added.
+12. The output is a new file and the input workbook remains unchanged.
+13. Existing validation tests remain: filename prefix, required tabs, empty Summary,
+    blocked-assignee rejection, and output filename generation.
+
+14. Reference-style colors are represented by named, fixed ARGB constants. Test exact
+   header fills, font colors, borders, and missing-data highlights against those
+   constants; do not depend on opening a separate reference workbook at test time.
+
+## Live Azure DevOps validation (required when credentials and report are available)
+
+Live checks use the generated Summary workbook as the subject and the input report's
+`All`, `FPSO`, and `Foundation` tabs to identify PBI IDs and embedded team query URLs.
+Use the PAT from the ignored local `localconfig` file (or the existing environment
+variable override), never print or ask the user to paste the secret, and perform only
+read-only Azure DevOps API requests. Discover IDs dynamically; do not hardcode sample
+PBI or Task/Bug IDs.
+
+For every PBI in Summary:
+
+1. **PBI identity and Story Points:** Fetch that exact PBI from Azure DevOps. Verify its
+  type is Product Backlog Item and compare Summary's PBI ID/title and PBI Story Points
+  with the live PBI fields. Check `Microsoft.VSTS.Scheduling.StoryPoints`. If Summary
+  shows `No_Story_Point`, verify that the live field is actually unset; otherwise check
+  the numeric/value match. Report PBI ID, title, Summary value, live value, and field
+  name on mismatch.
+2. **Task/Bug inventory:** Enumerate the PBI's live hierarchy child links, fetch the
+  linked work items, and identify all Task and Bug children. Compare the live set with
+  that PBI's Task/Bug rows in the report's `All` tab. Detect missing and extra items;
+  report IDs/titles and the PBI they belong to.
+3. **Total Hours:** Compute expected Total Hours from the live children themselves by
+  summing their numeric Completed Work values. Treat explicit zero as present. Compare
+  the result with Summary's Total Hours.
+4. **Missing task hours:** For each live child with absent/blank Completed Work, verify
+  it is identified as missing by the report-derived Summary. Verify the displayed total
+  is the sum of only children with recorded hours, while the missing-hours annotation
+  and highlight are present. List each missing Task/Bug ID/title. A `No_Hours` placeholder
+  is missing data; numeric 0 is not.
+5. **Category Effort:** Independently total live children by the six Summary categories
+  using each child's corresponding Task/Bug categorization from the report. Compare each
+  category effort cell with the sum of that category's live Completed Work. Missing hours
+  contribute zero but remain listed as missing. Report unrecognized/blank categories.
+6. **Effort reconciliation:** Verify the six category effort values sum to Total Hours.
+  A mismatch is a failure, with the PBI and category values listed. Do not silently
+  adjust totals or invent balancing effort.
+7. **Percentages:** Recalculate every percentage as `category effort / Total Hours * 100`;
+  when total hours is zero, all percentages must be zero. Compare using a tolerance of
+  0.1 percentage point for one-decimal display. For positive totals, verify the six
+  percentages sum to 100%, allowing only for display rounding.
+8. **Missing Story Points:** For every `No_Story_Point` value, confirm directly from that
+  PBI's live record that Story Points is unset. If present live but missing in Summary,
+  or vice versa, fail with details.
+9. **PBI with no children:** For every PBI represented without Task/Bug children, check
+  live child relations and confirm there are no Task/Bug children. Verify Total Hours,
+  all Effort cells, and all Percentage cells are zero.
+10. **Query/team scope:** Re-run each exact query URL embedded in the corresponding team
+   tab. Verify each reported PBI is in that team's query results and each child is
+   actually a hierarchy child of an included PBI. Do not invent or broaden a query.
+
+If the PAT is unavailable, a query fails, or the API cannot return required live fields,
+mark the relevant check NOT EXECUTED or INCONCLUSIVE; never report it as passing. Live
+checks must compare the generated Summary to Azure DevOps live PBI/task/bug data, not
+merely compare Summary to another sheet in the same workbook.
+
+## Generated-workbook tests
+
+- Validate the newest generated summary workbook's Summary tab structure and row count.
+- Independently recompute each PBI's Total Hours, category effort, and percentages from
+  that workbook's `All` tab and compare them with Summary.
+- Verify all used fills/fonts/borders against the hardcoded approved color constants and
+  check the expected yellow missing-data cells.
+- Keep live API validations above separate and explicitly marked, with a clear skip reason
+  when no PAT or suitable report is available. Never fabricate live query results.
+
+Remove/replace obsolete tests that assert pie-chart counts, chart helper data, per-PBI
+category subrows, merged cells, or chart rendering options. Those behaviors are no longer
+part of the requested Summary design.
+
+## Implementation sequence
+
+1. Change `CATEGORY_ORDER`/summary headers to the flat 16-column design.
+2. Keep/reuse `read_all_tab()` and `summarize_pbis()` where appropriate; make unknown
+   categories and reconciliation errors explicit.
+3. Rewrite `write_summary_sheet()` to create grouped headers and one row per PBI; remove
+   chart creation and chart helper logic/imports/constants.
+4. Preserve workbook validation, blocked-assignee validation, output naming, and
+   source-file immutability.
+5. Replace chart/layout tests with calculation, format, validation, and no-chart tests.
+6. Implement the live Azure DevOps tests above using the shared local PAT loader and
+  workbook-embedded query URLs. These checks are required when credentials and live
+  Azure DevOps are available; they must skip explicitly rather than use fabricated data
+  when unavailable.
+7. Run the full summary test suite and generate a new output workbook from a copy of a
+  current report; inspect the `Summary` tab in Excel for final layout and color validation.
+
+## Known reference-data inconsistency to verify
+
+The shared example shows PBI `34791` with Total Hours 9, while displayed category effort
+values are 4, 4, and 5 (sum 13), and its percentages therefore sum to 144.4%. The new
+implementation must not reproduce this inconsistency silently. Its primary calculation
+source is the Task/Bug rows in the selected input report's `All` tab. It should calculate
+both total and category effort from those same rows, then fail clearly if they do not
+reconcile. The reference workbook is a formatting example, not a source of hardcoded
+values or expected task IDs.

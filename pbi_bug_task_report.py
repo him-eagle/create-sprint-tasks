@@ -619,7 +619,7 @@ def run_report(session, sprint_name, fpso_url, foundation_url, output_dir=OUTPUT
     os.makedirs(output_dir, exist_ok=True)
     sprint_component = sanitize_filename_component(sprint_name)
     output_path = os.path.join(
-        output_dir, f"PBI_Bug_Task_Report_{sprint_component}_{timestamp}.xlsx"
+        output_dir, f"Effort_Level_Analysis_{sprint_component}_{timestamp}.xlsx"
     )
 
     print(f"\nWriting Excel report to {output_path} ...")
