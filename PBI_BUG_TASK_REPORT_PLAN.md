@@ -119,6 +119,11 @@ PBI_Bug_Task_Report_<Sprint>_<timestamp>.xlsx
   (`Microsoft.VSTS.Common.ClosedDate`).
 - All states are included (not just Done) — actual state value shown as-is, for both
   PBIs and their child Task/Bug items.
+- Exclude any PBI assigned to Himanshu Pathak (case/whitespace-insensitive) and omit all
+  its children from the report. For other included PBIs, exclude only Task/Bug children
+  assigned to Himanshu Pathak. Preserve the PBI as a PBI-only row if all its children are
+  excluded. Log counts for excluded PBIs, excluded children, and children omitted with an
+  excluded PBI.
 - **Missing-value placeholders:**
   - If a PBI has no Story Points value set, the **PBI Story Points** column shows
     `No_Story_Point` instead of being left blank.
@@ -249,7 +254,7 @@ to exist in `Reports\Pbi_bug_tasks\` (produced by actually running
 
    or
 
-   python -m unittest -v test_pbi_bug_task_report
+   py -m unittest -v .\test_pbi_bug_task_report.py
    ```
 
 If step 2 is run without first completing step 1, the pure unit tests still run and pass,

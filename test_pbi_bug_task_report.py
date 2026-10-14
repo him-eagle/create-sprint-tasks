@@ -186,23 +186,29 @@ class BuildRowsTests(unittest.TestCase):
     """build_rows() is pure (no HTTP). These feed it hand-built work item
     dicts directly -- no Azure DevOps query is simulated."""
 
-    def _pbi(self, pbi_id):
+    def _pbi(self, pbi_id, assigned_to=None):
+        fields = {
+            "System.WorkItemType": "Product Backlog Item",
+            "System.Title": f"PBI {pbi_id}",
+        }
+        if assigned_to is not None:
+            fields["System.AssignedTo"] = assigned_to
         return {
             "id": pbi_id,
-            "fields": {
-                "System.WorkItemType": "Product Backlog Item",
-                "System.Title": f"PBI {pbi_id}",
-            },
+            "fields": fields,
         }
 
-    def _child(self, child_id, parent_id, wi_type="Task"):
+    def _child(self, child_id, parent_id, wi_type="Task", assigned_to=None):
+        fields = {
+            "System.WorkItemType": wi_type,
+            "System.Title": f"Child {child_id}",
+            "System.Parent": parent_id,
+        }
+        if assigned_to is not None:
+            fields["System.AssignedTo"] = assigned_to
         return {
             "id": child_id,
-            "fields": {
-                "System.WorkItemType": wi_type,
-                "System.Title": f"Child {child_id}",
-                "System.Parent": parent_id,
-            },
+            "fields": fields,
         }
 
     def test_child_linked_to_included_pbi_is_included(self):
@@ -246,6 +252,48 @@ class BuildRowsTests(unittest.TestCase):
         rows, stats = report.build_rows(pbis, [], "org", "proj", "FPSO")
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["task_id"])
+
+    def test_pbi_assigned_to_himanshu_and_all_its_children_are_excluded(self):
+        pbis = [
+            self._pbi(1, assigned_to="hImAnShUpAtHaK"),
+            self._pbi(2, assigned_to="Other Person"),
+        ]
+        children = [
+            self._child(10, parent_id=1, assigned_to="Other Person"),
+            self._child(20, parent_id=2, assigned_to="Other Person"),
+        ]
+
+        rows, stats = report.build_rows(pbis, children, "org", "proj", "FPSO")
+
+        self.assertEqual({row["pbi_id"] for row in rows}, {2})
+        self.assertEqual([row["task_id"] for row in rows], [20])
+        self.assertEqual(stats["excluded_pbi_count"], 1)
+        self.assertEqual(stats["children_of_excluded_pbis_count"], 1)
+
+    def test_task_assigned_to_himanshu_is_excluded_but_other_pbi_rows_remain(self):
+        pbis = [self._pbi(1)]
+        children = [
+            self._child(10, parent_id=1, assigned_to="HIMANSHU PATHAK"),
+            self._child(11, parent_id=1, assigned_to="Other Person"),
+        ]
+
+        rows, stats = report.build_rows(pbis, children, "org", "proj", "FPSO")
+
+        self.assertEqual([row["task_id"] for row in rows], [11])
+        self.assertEqual(stats["excluded_child_count"], 1)
+        self.assertEqual(stats["pbi_count"], 1)
+
+    def test_pbi_remains_as_pbi_only_when_all_its_tasks_are_excluded(self):
+        pbis = [self._pbi(1)]
+        children = [self._child(10, parent_id=1, assigned_to="HimanshuPathak")]
+
+        rows, stats = report.build_rows(pbis, children, "org", "proj", "FPSO")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pbi_id"], 1)
+        self.assertIsNone(rows[0]["task_id"])
+        self.assertEqual(stats["excluded_child_count"], 1)
+        self.assertEqual(stats["pbi_without_children"], 1)
 
     def test_missing_story_points_become_placeholder_in_row(self):
         """A PBI with no Story Points field set produces a row where
@@ -706,11 +754,23 @@ class LatestReportLiveApiTests(unittest.TestCase):
         candidate_children = [fetched_by_id[cid] for cid in child_ids if cid in fetched_by_id]
         child_items = report.filter_types(candidate_children, report.CHILD_TYPES)
 
-        pbis = {item["id"]: item for item in pbi_items}
+        excluded_pbi_ids = {
+            item["id"] for item in pbi_items
+            if report.is_excluded_assignee(item.get("fields", {}))
+        }
+        pbis = {
+            item["id"]: item for item in pbi_items
+            if item["id"] not in excluded_pbi_ids
+        }
         mapping = {pbi_id: set() for pbi_id in pbis}
+        excluded_child_ids = set()
         for child in child_items:
             parent_id = report.get_parent_id(child)
-            if parent_id in mapping:
+            if parent_id in excluded_pbi_ids:
+                excluded_child_ids.add(child["id"])
+            elif report.is_excluded_assignee(child.get("fields", {})):
+                excluded_child_ids.add(child["id"])
+            elif parent_id in mapping:
                 mapping[parent_id].add(child["id"])
 
         fields_by_id = {item["id"]: item.get("fields", {}) for item in pbi_items}
@@ -720,7 +780,44 @@ class LatestReportLiveApiTests(unittest.TestCase):
             "query_ids": set(query_ids),
             "mapping": mapping,
             "fields_by_id": fields_by_id,
+            "excluded_pbi_ids": excluded_pbi_ids,
+            "excluded_child_ids": excluded_child_ids,
         }
+
+    def test_live_data_excludes_himanshu_assigned_items(self):
+        """Items currently assigned to Himanshu in Azure DevOps must be
+        excluded from the report: an assigned PBI and its descendants are
+        omitted, while an assigned Task/Bug under another PBI is omitted by
+        itself. This compares live assignment fields with the workbook rows.
+        """
+        failures = []
+        live_exclusions = {"pbis": set(), "children": set()}
+
+        for team in TEAM_TABS:
+            if team not in self.workbook.sheetnames:
+                continue
+            expected = self._expected_state(team)
+            live_exclusions["pbis"].update(expected["excluded_pbi_ids"])
+            live_exclusions["children"].update(expected["excluded_child_ids"])
+            data_rows, col = self._team_table(team)
+
+            for row in data_rows:
+                pbi_id = row[col["PBI ID"]]
+                task_id = row[col["Task ID"]]
+                if pbi_id in expected["excluded_pbi_ids"]:
+                    failures.append((team, "excluded PBI present", pbi_id))
+                if task_id in expected["excluded_child_ids"]:
+                    failures.append((team, "excluded Task/Bug present", task_id))
+                if _normalize_assignee(row[col["Assigned To"]]) == _normalize_assignee(
+                    "Himanshu Pathak"
+                ):
+                    failures.append((team, "Himanshu assignment present", pbi_id, task_id))
+
+        self.assertFalse(
+            failures,
+            "Live Azure DevOps assignments are not properly excluded from the report: "
+            f"{failures}; live excluded item IDs={live_exclusions}",
+        )
 
     def test_parent_child_correspondence_matches_live_api(self):
         """The PBI->Task/Bug mapping actually written into the report must
@@ -836,21 +933,16 @@ class LatestReportLiveApiTests(unittest.TestCase):
             "(team, id, field, expected, actual):\n" + "\n".join(str(f) for f in failures),
         )
 
-    def test_every_queried_pbi_is_in_the_report_with_matching_count(self):
-        """Completes the round-trip check: every PBI currently returned by
-        re-running a team's query live must appear somewhere in that team's
-        report tab, AND the number of distinct PBIs returned by the live
-        query must exactly equal the number of distinct PBIs in the report
-        tab. (The other live-API tests above check the opposite direction
-        -- that every PBI *in the report* came from the query -- so this
-        test closes the loop and catches a PBI that the query returns but
-        that the report is missing, or a stale/duplicate PBI count.)
+    def test_every_included_queried_pbi_is_in_the_report_with_matching_count(self):
+        """Every PBI currently returned by a team's live query, except PBIs
+        assigned to Himanshu Pathak, must appear in that team's report tab;
+        the distinct PBI counts must also match. Excluded PBIs are intentionally
+        not counted as missing. (The other live-API tests check the reverse
+        direction -- that each report PBI came from the query.)
 
-        Example: if re-running the "FPSO" query live returns PBIs
-        {101, 102, 103} (3 PBIs), but the "FPSO" tab in the report only
-        contains rows for PBIs {101, 102} (2 PBIs, missing 103), this test
-        fails reporting the missing PBI 103 and the count mismatch
-        3 (query) != 2 (report).
+        Example: if re-running the "FPSO" query live returns eligible PBIs
+        {101, 102, 103} (3 PBIs), but the "FPSO" tab contains only {101, 102},
+        this test fails reporting PBI 103 and the count mismatch 3 != 2.
         """
         failures = []
         for team in TEAM_TABS:

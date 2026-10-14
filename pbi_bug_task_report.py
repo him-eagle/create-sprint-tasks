@@ -67,6 +67,7 @@ COMPLETED_WORK_FIELD = "Microsoft.VSTS.Scheduling.CompletedWork"
 
 NO_STORY_POINT_PLACEHOLDER = "No_Story_Point"
 NO_HOURS_PLACEHOLDER = "No_Hours"
+EXCLUDED_ASSIGNEE = "Himanshu Pathak"
 
 # ---------------------------------------------------------------------------
 # Categorization keyword lists (rule-based). Edit these lists to tune
@@ -254,6 +255,15 @@ def get_assigned_to(fields):
     return ""
 
 
+def normalize_assignee(value):
+    """Normalize case and whitespace for reliable assignee matching."""
+    return "".join(str(value or "").split()).casefold()
+
+
+def is_excluded_assignee(fields):
+    return normalize_assignee(get_assigned_to(fields)) == normalize_assignee(EXCLUDED_ASSIGNEE)
+
+
 def get_parent_id(item):
     fields = item.get("fields", {})
     parent = fields.get("System.Parent")
@@ -336,12 +346,28 @@ def build_rows(pbi_items, child_items, org, project, team_label):
 
     Returns (rows, stats), where stats describes included/skipped items.
     """
-    pbis = {item["id"]: item for item in pbi_items}
+    all_pbis = {item["id"]: item for item in pbi_items}
+    excluded_pbi_ids = {
+        pbi_id for pbi_id, item in all_pbis.items()
+        if is_excluded_assignee(item.get("fields", {}))
+    }
+    pbis = {
+        pbi_id: item for pbi_id, item in all_pbis.items()
+        if pbi_id not in excluded_pbi_ids
+    }
 
     children_by_parent = {}
     orphan_count = 0
+    excluded_child_count = 0
+    excluded_with_pbi_count = 0
     for child in child_items:
         parent_id = get_parent_id(child)
+        if parent_id in excluded_pbi_ids:
+            excluded_with_pbi_count += 1
+            continue
+        if is_excluded_assignee(child.get("fields", {})):
+            excluded_child_count += 1
+            continue
         if parent_id is not None and parent_id in pbis:
             children_by_parent.setdefault(parent_id, []).append(child)
         else:
@@ -417,6 +443,9 @@ def build_rows(pbi_items, child_items, org, project, team_label):
         "linked_child_count": linked_child_count,
         "orphan_count": orphan_count,
         "pbi_without_children": pbi_without_children,
+        "excluded_pbi_count": len(excluded_pbi_ids),
+        "excluded_child_count": excluded_child_count,
+        "children_of_excluded_pbis_count": excluded_with_pbi_count,
     }
 
 
@@ -486,6 +515,9 @@ def fetch_query_data(session, url, team_label):
         f"        {stats['pbi_count']} PBI(s), "
         f"{stats['linked_child_count']} linked Task/Bug item(s), "
         f"{stats['orphan_count']} orphan Task/Bug item(s) skipped, "
+        f"{stats['excluded_pbi_count']} PBI(s) assigned to {EXCLUDED_ASSIGNEE} excluded, "
+        f"{stats['excluded_child_count']} Task/Bug item(s) assigned to {EXCLUDED_ASSIGNEE} excluded, "
+        f"{stats['children_of_excluded_pbis_count']} child item(s) under excluded PBI(s) omitted, "
         f"{stats['pbi_without_children']} PBI-only row(s), "
         f"{len(rows)} report row(s)"
     )

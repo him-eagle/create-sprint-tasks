@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -27,6 +28,18 @@ def _latest_summary_report_path():
         reverse=True,
     )
     return reports[0] if reports else None
+
+
+def _has_pbi_state_summary(path):
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        return any(
+            cell.value == "PBI State"
+            for row in workbook["Summary"].iter_rows()
+            for cell in row
+        )
+    finally:
+        workbook.close()
 
 
 def _source_workbook(path, rows, *, summary_content=False):
@@ -99,11 +112,11 @@ def _summary_map(ws):
 
 
 def _effort_col(category):
-    return 5 + summary.CATEGORY_ORDER.index(category)
+    return 6 + summary.CATEGORY_ORDER.index(category)
 
 
 def _percentage_col(category):
-    return 11 + summary.CATEGORY_ORDER.index(category)
+    return 12 + summary.CATEGORY_ORDER.index(category)
 
 
 def _parse_work_item_url(url):
@@ -117,8 +130,8 @@ class FilenameAndWorkbookValidationTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
 
     def test_filename_prefix_required(self):
-        summary.validate_input_filename(self.temp_dir / "PBI_Bug_Task_Report_1.xlsx")
-        with self.assertRaisesRegex(ValueError, "PBI_Bug_Task_Report_"):
+        summary.validate_input_filename(self.temp_dir / "Effort_Level_Analysis_1.xlsx")
+        with self.assertRaisesRegex(ValueError, "Effort_Level_Analysis_"):
             summary.validate_input_filename(self.temp_dir / "other.xlsx")
 
     def test_required_tabs_required(self):
@@ -141,6 +154,30 @@ class FilenameAndWorkbookValidationTests(unittest.TestCase):
         wb = load_workbook(path)
         summary.validate_workbook_structure(wb)
         wb.close()
+
+    def test_himanshu_email_and_display_name_are_recognized(self):
+        configured_email = summary.himanshu_email()
+        self.assertTrue(configured_email, "HIMANSHU_EMAIL must be set in localconfig or the environment")
+        self.assertTrue(summary.is_himanshu_assignee(configured_email))
+        self.assertTrue(summary.is_himanshu_assignee("HimanshuPathak"))
+        self.assertFalse(summary.is_himanshu_assignee("Another Person"))
+
+    def test_himanshu_assigned_pbi_and_its_task_rows_are_excluded(self):
+        rows = [
+            {"pbi_id": 77, "task_id": 770, "pbi_title": "Assigned PBI"},
+            {"pbi_id": 78, "task_id": 780, "pbi_title": "Other PBI"},
+        ]
+        live_metadata = {
+            77: {"state": "Active", "assigned_to": {"uniqueName": summary.himanshu_email()}},
+            78: {"state": "New", "assigned_to": {"displayName": "Another Person"}},
+        }
+
+        included_rows, excluded_ids = summary.exclude_himanshu_assigned_pbis(
+            rows, live_metadata
+        )
+
+        self.assertEqual(excluded_ids, {77})
+        self.assertEqual({row["pbi_id"] for row in included_rows}, {78})
 
     def test_output_name_replaces_existing_timestamp(self):
         result = summary.build_output_filename(
@@ -167,7 +204,10 @@ class SummaryCalculationTests(unittest.TestCase):
         path = _source_workbook(self.temp_dir / "PBI_Bug_Task_Report_1.xlsx", _sample_rows())
         wb = load_workbook(path)
         try:
-            return summary.read_all_tab(wb)
+            rows = summary.read_all_tab(wb)
+            for row in rows:
+                row["pbi_state"] = "Active" if row["pbi_id"] == 88001 else "New"
+            return rows
         finally:
             wb.close()
 
@@ -177,7 +217,7 @@ class SummaryCalculationTests(unittest.TestCase):
         self.assertFalse(summary.is_missing_hours(0))
         self.assertEqual(summary.hours_to_number("No_Hours"), 0)
         self.assertEqual(summary.hours_to_number(0), 0)
-        rows = [{"pbi_id": 9, "pbi_title": "Empty", "pbi_story_points": 0,
+        rows = [{"pbi_id": 9, "pbi_title": "Empty", "pbi_state": "New", "pbi_story_points": 0,
                  "pbi_url": None, "task_id": None, "task_title": None,
                  "completed_work": None, "categorization": None}]
         [empty] = summary.summarize_pbis(rows)
@@ -186,7 +226,7 @@ class SummaryCalculationTests(unittest.TestCase):
         self.assertEqual(set(empty["category_percentages"].values()), {0.0})
 
     def test_unexpected_or_blank_category_fails_with_pbi_and_task(self):
-        rows = [{"pbi_id": 900, "pbi_title": "P", "pbi_story_points": 1,
+        rows = [{"pbi_id": 900, "pbi_title": "P", "pbi_state": "New", "pbi_story_points": 1,
                  "pbi_url": None, "task_id": 901, "task_title": "Unclassified",
                  "completed_work": 2, "categorization": ""}]
         with self.assertRaisesRegex(ValueError, "PBI 900.*901.*unexpected"):
@@ -194,9 +234,9 @@ class SummaryCalculationTests(unittest.TestCase):
 
     def test_categories_and_total_are_from_same_task_hours(self):
         rows = [
-            {"pbi_id": 5, "pbi_title": "P", "pbi_story_points": 2, "pbi_url": None,
+            {"pbi_id": 5, "pbi_title": "P", "pbi_state": "Active", "pbi_story_points": 2, "pbi_url": None,
              "task_id": 50, "task_title": "A", "completed_work": 2, "categorization": "Review"},
-            {"pbi_id": 5, "pbi_title": "P", "pbi_story_points": 2, "pbi_url": None,
+            {"pbi_id": 5, "pbi_title": "P", "pbi_state": "Active", "pbi_story_points": 2, "pbi_url": None,
              "task_id": 51, "task_title": "B", "completed_work": 3, "categorization": "Development"},
         ]
         [pbi] = summary.summarize_pbis(rows)
@@ -214,10 +254,10 @@ class WriteSummarySheetTests(unittest.TestCase):
     def test_grouped_headers_columns_and_flat_one_row_per_pbi(self):
         wb, pbi = self._create(self._load_source())
         ws = wb["Summary"]
-        self.assertEqual((ws["E1"].value, ws["K1"].value), ("Effort", "Percentage"))
-        self.assertEqual([ws.cell(2, col).value for col in range(1, 17)], summary.SUMMARY_HEADERS)
+        self.assertEqual((ws["F1"].value, ws["L1"].value), ("Effort", "Percentage"))
+        self.assertEqual([ws.cell(2, col).value for col in range(1, 18)], summary.SUMMARY_HEADERS)
         self.assertEqual(ws.max_row, 2 + len(pbi))
-        self.assertEqual([str(r) for r in ws.merged_cells.ranges], ["E1:J1", "K1:P1"])
+        self.assertEqual([str(r) for r in ws.merged_cells.ranges], ["F1:K1", "L1:Q1"])
         self.assertEqual(len(ws._charts), 0)
         self.assertFalse(any(dim.hidden for dim in ws.column_dimensions.values()))
         wb.close()
@@ -229,7 +269,10 @@ class WriteSummarySheetTests(unittest.TestCase):
         path = _source_workbook(self.temp_dir / "PBI_Bug_Task_Report_2.xlsx", _sample_rows())
         wb = load_workbook(path)
         try:
-            return summary.read_all_tab(wb)
+            rows = summary.read_all_tab(wb)
+            for row in rows:
+                row["pbi_state"] = "Active" if row["pbi_id"] == 88001 else "New"
+            return rows
         finally:
             wb.close()
 
@@ -240,6 +283,7 @@ class WriteSummarySheetTests(unittest.TestCase):
         row = 3
         self.assertEqual(ws.cell(row, cols["PBI ID"]).value, 88001)
         self.assertEqual(ws.cell(row, cols["PBI Title"]).value, "Dynamic sample PBI")
+        self.assertEqual(ws.cell(row, cols["PBI State"]).value, "Active")
         self.assertEqual(ws.cell(row, cols["PBI Story Points"]).value, 3)
         self.assertEqual(ws.cell(row, cols["Total Hours"]).value, "8 (some tasks/bugs missing hours)")
         self.assertEqual(ws.cell(row, _effort_col("Development")).value, 6)
@@ -248,7 +292,7 @@ class WriteSummarySheetTests(unittest.TestCase):
         self.assertAlmostEqual(ws.cell(row, _percentage_col("Development")).value, 75)
         self.assertEqual(ws.cell(row, 1).hyperlink.target,
                          "https://dev.azure.com/org/proj/_workitems/edit/88001")
-        self.assertEqual(ws.cell(row, 4).fill.fgColor.rgb, summary.YELLOW_FILL.fgColor.rgb)
+        self.assertEqual(ws.cell(row, 5).fill.fgColor.rgb, summary.YELLOW_FILL.fgColor.rgb)
         wb.close()
 
     def test_percentage_values_and_number_formats(self):
@@ -265,30 +309,30 @@ class WriteSummarySheetTests(unittest.TestCase):
         ws = wb["Summary"]
         self.assertTrue(ws["A2"].font.bold)
         for row in range(1, 3):
-            for column in range(1, 5):
+            for column in range(1, 6):
                 cell = ws.cell(row, column)
                 self.assertEqual(cell.fill.fgColor.rgb, summary.DARK_BLUE_HEADER_ARGB)
                 self.assertEqual(cell.font.color.rgb, summary.HEADER_FONT_COLOR)
                 self.assertTrue(cell.font.bold)
-            for column in range(5, 11):
+            for column in range(6, 12):
                 cell = ws.cell(row, column)
                 self.assertEqual(cell.fill.fgColor.rgb, summary.EFFORT_HEADER_ARGB)
                 self.assertEqual(cell.font.color.rgb, summary.HEADER_FONT_COLOR)
                 self.assertTrue(cell.font.bold)
-            for column in range(11, 17):
+            for column in range(12, 18):
                 cell = ws.cell(row, column)
                 self.assertEqual(cell.fill.fgColor.rgb, summary.DARK_BLUE_HEADER_ARGB)
                 self.assertEqual(cell.font.color.rgb, summary.HEADER_FONT_COLOR)
                 self.assertTrue(cell.font.bold)
         self.assertIsNone(ws["A3"].fill.fill_type)
-        for address in ("A2", "P2", "A3", "P3"):
+        for address in ("A2", "Q2", "A3", "Q3"):
             cell = ws[address]
             for edge in (cell.border.left, cell.border.right, cell.border.top, cell.border.bottom):
                 self.assertEqual(edge.style, "thin", f"{address} is missing a visible border")
             self.assertEqual(cell.border.top.color.rgb, summary.VISIBLE_BORDER_COLOR)
         for address, expected_left, expected_right in (
-            ("E1", "thin", None), ("J1", None, "thin"),
-            ("K1", "thin", None), ("P1", None, "thin"),
+            ("F1", "thin", None), ("K1", None, "thin"),
+            ("L1", "thin", None), ("Q1", None, "thin"),
         ):
             cell = ws[address]
             self.assertEqual(cell.border.left.style, expected_left)
@@ -296,11 +340,11 @@ class WriteSummarySheetTests(unittest.TestCase):
             self.assertEqual(cell.border.top.style, "thin")
             self.assertEqual(cell.border.bottom.style, "thin")
         self.assertEqual(ws["A3"].font.color.rgb, summary.HYPERLINK_FONT_COLOR)
-        self.assertEqual(ws["C4"].fill.fgColor.rgb, "FFFFFF00")
+        self.assertEqual(ws["D4"].fill.fgColor.rgb, "FFFFFF00")
         wb.close()
 
     def test_unknown_category_reports_pbi_and_task(self):
-        rows = [{"pbi_id": 42, "pbi_title": "P", "pbi_story_points": 1,
+        rows = [{"pbi_id": 42, "pbi_title": "P", "pbi_state": "Active", "pbi_story_points": 1,
                  "pbi_url": None, "task_id": 420, "task_title": "bad cat",
                  "completed_work": 3, "categorization": "Unmapped"}]
         with self.assertRaisesRegex(ValueError, "PBI 42.*420.*Unmapped"):
@@ -313,16 +357,27 @@ class BuildOutputTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
 
     def test_build_writes_new_copy_and_preserves_source(self):
-        source = _source_workbook(self.temp_dir / "PBI_Bug_Task_Report_77_20261001_000000.xlsx",
+        source = _source_workbook(self.temp_dir / "Effort_Level_Analysis_77_20261001_000000.xlsx",
                                   _sample_rows())
         before = source.read_bytes()
-        output = summary.build_summary_workbook(str(source), output_dir=str(self.temp_dir / "out"))
+        with patch.object(
+            summary,
+            "fetch_live_pbi_metadata",
+            return_value={
+                88001: {"state": "Active", "assigned_to": "Engineer"},
+                88002: {"state": "New", "assigned_to": "Engineer"},
+            },
+        ):
+            output = summary.build_summary_workbook(
+                str(source), output_dir=str(self.temp_dir / "out")
+            )
         self.assertNotEqual(Path(output), source)
         self.assertTrue(Path(output).exists())
         self.assertEqual(source.read_bytes(), before)
         wb = load_workbook(output, data_only=False)
         self.assertEqual(wb.sheetnames, ["Summary", "All", "FPSO", "Foundation"])
         self.assertEqual(wb["Summary"].max_row, 4)
+        self.assertEqual(wb["Summary"]["C3"].value, "Active")
         wb.close()
 
 
@@ -332,6 +387,11 @@ class LatestSummaryStructureTests(unittest.TestCase):
         cls.report_path = _latest_summary_report_path()
         if cls.report_path is None:
             raise unittest.SkipTest(f"No generated flat Summary workbook found in {REPORT_DIR}.")
+        if not _has_pbi_state_summary(cls.report_path):
+            raise unittest.SkipTest(
+            "Latest generated Summary predates the PBI State column; regenerate it "
+            "before running current generated-workbook checks."
+            )
         cls.workbook = load_workbook(cls.report_path, data_only=True)
 
     @classmethod
@@ -340,16 +400,16 @@ class LatestSummaryStructureTests(unittest.TestCase):
 
     def test_latest_summary_is_flat_and_reconciles_to_all_tab(self):
         ws = self.workbook["Summary"]
-        self.assertEqual(ws["E1"].value, "Effort")
-        self.assertEqual(ws["K1"].value, "Percentage")
-        self.assertEqual([ws.cell(2, c).value for c in range(1, 17)], summary.SUMMARY_HEADERS)
+        self.assertEqual(ws["F1"].value, "Effort")
+        self.assertEqual(ws["L1"].value, "Percentage")
+        self.assertEqual([ws.cell(2, c).value for c in range(1, 18)], summary.SUMMARY_HEADERS)
         all_rows = summary.read_all_tab(self.workbook)
         expected = summary.summarize_pbis(all_rows)
         self.assertEqual(ws.max_row, 2 + len(expected))
         cols = _summary_map(ws)
         for row_num, pbi in enumerate(expected, start=3):
             self.assertEqual(ws.cell(row_num, cols["PBI ID"]).value, pbi["pbi_id"])
-            self.assertAlmostEqual(float(re.match(r"^[\d.]+", str(ws.cell(row_num, 4).value)).group()),
+            self.assertAlmostEqual(float(re.match(r"^[\d.]+", str(ws.cell(row_num, 5).value)).group()),
                                    pbi["total_hours"])
             for category in summary.CATEGORY_ORDER:
                 self.assertAlmostEqual(ws.cell(row_num, _effort_col(category)).value,
@@ -360,7 +420,7 @@ class LatestSummaryStructureTests(unittest.TestCase):
     def test_latest_summary_has_no_charts_or_data_merges(self):
         ws = self.workbook["Summary"]
         self.assertEqual(len(ws._charts), 0)
-        self.assertEqual({str(r) for r in ws.merged_cells.ranges}, {"E1:J1", "K1:P1"})
+        self.assertEqual({str(r) for r in ws.merged_cells.ranges}, {"F1:K1", "L1:Q1"})
 
     def test_latest_summary_colors_and_missing_values(self):
         ws = self.workbook["Summary"]
@@ -369,10 +429,10 @@ class LatestSummaryStructureTests(unittest.TestCase):
         self.assertIsNone(ws["A3"].fill.fill_type)
         self.assertIsNone(ws["A2"].border.bottom.style)
         for row in range(3, ws.max_row + 1):
-            if ws.cell(row, 3).value == summary.NO_STORY_POINT_PLACEHOLDER:
-                self.assertEqual(ws.cell(row, 3).fill.fgColor.rgb, "FFFFFF00")
-            if isinstance(ws.cell(row, 4).value, str) and summary.MISSING_HOURS_NOTE in ws.cell(row, 4).value:
+            if ws.cell(row, 4).value == summary.NO_STORY_POINT_PLACEHOLDER:
                 self.assertEqual(ws.cell(row, 4).fill.fgColor.rgb, "FFFFFF00")
+            if isinstance(ws.cell(row, 5).value, str) and summary.MISSING_HOURS_NOTE in ws.cell(row, 5).value:
+                self.assertEqual(ws.cell(row, 5).fill.fgColor.rgb, "FFFFFF00")
 
 
 class LatestSummaryLiveApiTests(unittest.TestCase):
@@ -381,6 +441,11 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
         cls.report_path = _latest_summary_report_path()
         if cls.report_path is None:
             raise unittest.SkipTest("No generated summary workbook is available for live validation.")
+        if not _has_pbi_state_summary(cls.report_path):
+            raise unittest.SkipTest(
+            "Latest generated Summary predates the PBI State column; regenerate it "
+            "before live validation."
+            )
         token = report.load_pat_token()
         if not token:
             raise unittest.SkipTest("PAT unavailable in AZURE_DEVOPS_PAT/localconfig; live validation skipped.")
@@ -392,10 +457,12 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
         for row in cls.all_rows:
             cls.team_by_pbi[row["pbi_id"]] = row.get("team")
         cls.query_ids_by_team = {}
+        cls.org_project_by_team = {}
         for team in TEAM_TABS:
             ws = cls.workbook[team]
             source_url = ws.cell(1, 2).value
             info = report.parse_query_url(source_url)
+            cls.org_project_by_team[team] = (info["org"], info["project"])
             cls.query_ids_by_team[team] = set(report.run_wiql_query_by_id(
                 cls.session, info["org"], info["project"], info["query_id"]))
 
@@ -443,10 +510,54 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
             if summary_title != live_title:
                 failures.append((pbi_id, "PBI Title", summary_title, live_title))
             expected = report.format_story_points(live.get(report.STORY_POINTS_FIELD))
-            actual = ws.cell(row_num, 3).value
+            actual = ws.cell(row_num, 4).value
             if actual != expected:
                 failures.append((pbi_id, "Story Points", actual, expected))
         self.assertFalse(failures, f"Summary PBI fields differ from live PBIs: {failures}")
+
+    def test_every_summary_pbi_has_state_matching_live_azure_devops(self):
+        ws = self.workbook["Summary"]
+        failures = []
+        for pbi_id, row_num in self._summary_row_map().items():
+            actual_state = ws.cell(row_num, 3).value
+            live_state = self.live_by_pbi[pbi_id]["item"].get("fields", {}).get("System.State")
+            if not actual_state:
+                failures.append((pbi_id, "PBI State is blank", actual_state, live_state))
+            elif actual_state != live_state:
+                failures.append((pbi_id, "PBI State mismatch", actual_state, live_state))
+        self.assertFalse(failures, f"Summary PBI State differs from live Azure DevOps: {failures}")
+
+    def test_live_query_pbIs_assigned_to_himanshu_are_excluded_from_summary(self):
+        """Any PBI assigned to Himanshu in the live team query results must
+        not appear in the generated Summary, matching email or display name.
+        """
+        summary_ids = set(self._summary_row_map())
+        assigned_pbi_ids = set()
+        failures = []
+        for team in TEAM_TABS:
+            org, project = self.org_project_by_team[team]
+            query_items = report.get_work_items_full(
+                self.session, org, project, sorted(self.query_ids_by_team[team])
+            )
+            for pbi in report.filter_types(query_items, report.PBI_TYPES):
+                assignee = pbi.get("fields", {}).get("System.AssignedTo")
+                if not summary.is_himanshu_assignee(assignee):
+                    continue
+                pbi_id = pbi["id"]
+                assigned_pbi_ids.add(pbi_id)
+                if pbi_id in summary_ids:
+                    failures.append((team, pbi_id, "Himanshu-assigned PBI present in Summary"))
+
+        if not assigned_pbi_ids:
+            self.skipTest(
+                "No Himanshu-assigned PBIs were returned by embedded team queries; "
+                "live inclusion could not be exercised."
+            )
+        self.assertFalse(
+            failures,
+            f"Live PBIs assigned to Himanshu were not excluded from Summary: "
+            f"{failures}; live matching PBI IDs={sorted(assigned_pbi_ids)}",
+        )
 
     def test_summary_pbis_are_returned_by_their_team_queries(self):
         failures = []
@@ -508,7 +619,7 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
                 by_category[category] += hours
 
             row_num = row_map[pbi_id]
-            summary_total_raw = ws.cell(row_num, 4).value
+            summary_total_raw = ws.cell(row_num, 5).value
             total_text = str(summary_total_raw)
             match = re.match(r"^([\d.]+)", total_text)
             summary_total = float(match.group(1)) if match else None
@@ -521,14 +632,14 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
                 failures.append((pbi_id, "task-level missing-hours mismatch",
                                  missing_task_value_mismatches))
             if missing_ids:
-                if ws.cell(row_num, 4).fill.fgColor.rgb != "FFFFFF00":
+                if ws.cell(row_num, 5).fill.fgColor.rgb != "FFFFFF00":
                     failures.append((pbi_id, "missing-hours total is not highlighted yellow", missing_ids))
             if task_category_mismatches:
                 failures.append((pbi_id, "task-level categorization mismatch",
                                  task_category_mismatches))
             for offset, category in enumerate(summary.CATEGORY_ORDER):
-                effort_col = 5 + offset
-                percent_col = 11 + offset
+                effort_col = 6 + offset
+                percent_col = 12 + offset
                 actual_effort = ws.cell(row_num, effort_col).value
                 actual_percent = ws.cell(row_num, percent_col).value
                 expected_percent = by_category[category] * 100.0 / total if total else 0.0

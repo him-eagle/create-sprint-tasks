@@ -28,18 +28,25 @@ python -m unittest discover -s . -p "test_*.py" -v
 - Input is produced by `pbi_bug_task_report.py` and has `Summary`, `All`, `FPSO`, and
   `Foundation` tabs.
 - Read report data from `All`, using column headers rather than fixed column positions.
-- Group source rows dynamically by PBI ID. Include PBIs present in the input, including a
-  PBI-only row when it has no Task/Bug rows.
+- Group source rows dynamically by PBI ID. Include PBIs present in the input unless live
+  Azure DevOps metadata identifies Himanshu Pathak as the PBI assignee. Keep a PBI-only
+  row when an eligible PBI has no Task/Bug rows.
 - Continue to validate the input filename prefix, required sheets, and that its existing
   `Summary` sheet is empty before generating output.
-- Continue to reject the workbook if any relevant row is assigned to Himanshu Pathak,
-  using case/whitespace-insensitive matching and identifying the offending rows.
+- Exclude every PBI assigned to Himanshu Pathak and all rows belonging to that PBI from
+  Summary. Match either live `displayName` or `uniqueName`/email case- and
+  whitespace-insensitively. Store `HPathak@eagle.org` as `HIMANSHU_EMAIL` in ignored
+  `localconfig` and document the same key in `localconfig.example`.
+- Do not change the existing report producer or its workbook schema. Fetch PBI assignee
+  and `System.State` read-only from Azure DevOps using the PBI hyperlink/ID; the source
+  report does not carry a PBI State or PBI assignee column.
 
 ## Summary worksheet layout
 
 Replace the existing multi-row-per-PBI category breakdown and inline pie charts with a
 flat table: exactly one output row per PBI, no charts, no category subrows, no merged
-PBI-cell blocks, no hidden chart-helper columns, and no chart spacer rows.
+PBI-cell blocks, no hidden chart-helper columns, and no chart spacer rows. Exclude PBIs
+assigned to Himanshu Pathak and their associated task rows.
 
 Use two header rows:
 
@@ -49,29 +56,34 @@ Use two header rows:
 
 1. PBI ID
 2. PBI Title
-3. PBI Story Points
-4. Total Hours
-5. Bug Fixing (under Effort)
-6. QA / Testing (under Effort)
-7. Requirement Study (under Effort)
-8. Review (under Effort)
-9. Design / Documentation (under Effort)
-10. Development (under Effort)
-11. Bug Fixing (under Percentage)
-12. QA / Testing (under Percentage)
-13. Requirement Study (under Percentage)
-14. Review (under Percentage)
-15. Design / Documentation (under Percentage)
-16. Development (under Percentage)
+3. PBI State
+4. PBI Story Points
+5. Total Hours
+6. Bug Fixing (under Effort)
+7. QA / Testing (under Effort)
+8. Requirement Study (under Effort)
+9. Review (under Effort)
+10. Design / Documentation (under Effort)
+11. Development (under Effort)
+12. Bug Fixing (under Percentage)
+13. QA / Testing (under Percentage)
+14. Requirement Study (under Percentage)
+15. Review (under Percentage)
+16. Design / Documentation (under Percentage)
+17. Development (under Percentage)
 
 The Summary worksheet name must be exactly `Summary`. Do not create a separate tab per
 person or use a person's name as the Summary tab name. Ignore such names in the sample
-workbook; it is only a reference for the requested format.
+workbook; it is only a reference for the requested format. The first five metadata
+columns are PBI ID, PBI Title, PBI State, PBI Story Points, and Total Hours; Effort
+occupies F:K and Percentage occupies L:Q.
 
 ## Calculations and display
 
-- PBI ID, PBI Title, and PBI Story Points come from the PBI fields already repeated in
-  the input `All` tab. Preserve the PBI hyperlink when present.
+- PBI ID, PBI Title, and PBI Story Points come from the PBI fields already repeated in the
+  input `All` tab. Fetch `PBI State` (`System.State`) read-only from Azure DevOps using the
+  PBI hyperlink/ID, and fail clearly if it cannot be retrieved or is blank. Preserve the
+  PBI hyperlink when present.
 - `Total Hours` is the sum of `Completed Work (hrs)` for all Task/Bug rows belonging to
   that PBI. Treat `No_Hours`, blank, and missing values as zero for arithmetic, while
   retaining a flag indicating that one or more task values were missing.
@@ -88,11 +100,11 @@ workbook; it is only a reference for the requested format.
   PBI's Total Hours cell, e.g. `35.5 (some tasks/bugs missing hours)`, and highlight it
   yellow. Do not treat an explicit numeric zero as missing.
 - Preserve `No_Story_Point` when story points are absent and highlight that cell yellow.
-- Fill the complete `A1:D2` header block dark blue (`FF002060`, RGB `#002060`) with bold white text
+- Fill the complete `A1:E2` header block dark blue (`FF002060`, RGB `#002060`) with bold white text
   (`FFFFFFFF`); retain visible borders around every cell in the block.
-- Fill the complete `E1:J2` Effort block dark red (`FF9C0006`, RGB `#9C0006`) with bold
+- Fill the complete `F1:K2` Effort block dark red (`FF9C0006`, RGB `#9C0006`) with bold
   white text (`FFFFFFFF`); retain visible borders around every cell in the block.
-- Fill the complete `K1:P2` Percentage block dark blue (`FF002060`, RGB `#002060`) with
+- Fill the complete `L1:Q2` Percentage block dark blue (`FF002060`, RGB `#002060`) with
   bold white text (`FFFFFFFF`); retain visible borders around every cell in the block.
 - Draw visible thin gray borders around every grouped header, column header, and data cell
   in the Summary table. Use the fixed color `FF808080` for the border lines.
@@ -116,7 +128,8 @@ workbook; it is only a reference for the requested format.
 - Keep the source workbook untouched.
 - Use the existing output naming convention: insert `_Summary_<fresh timestamp>` before
   the `.xlsx` extension, replacing an existing trailing timestamp when present.
-- Keep local PAT handling and the Himanshu Pathak safety check as currently implemented.
+- Keep local PAT handling for live PBI metadata. Filter Himanshu-assigned PBIs and all
+  their Summary rows; retain the existing Task/Bug assignee safety check.
 - No pie charts, graph data, or workbook formulas are required for this flat summary.
 
 ## Unit-test changes
@@ -128,9 +141,9 @@ IDs except in a clearly named optional sample-regression test.
 Required pure unit tests:
 
 1. Summary worksheet is named `Summary` and has the two-row grouped header structure.
-2. The exact 16 column labels and category ordering are correct.
+2. The exact 17 column labels and category ordering are correct, including PBI State.
 3. Exactly one Summary data row is written for each unique PBI in `All`.
-4. PBI ID, title, story points, and hyperlink are preserved.
+4. PBI ID, title, live PBI State, story points, and hyperlink are preserved.
 5. Total Hours sums Completed Work, treating `No_Hours`/blank as zero and explicit zero
    as present data.
 6. Missing-hours note and yellow fill appear only when one or more task values are
@@ -145,9 +158,13 @@ Required pure unit tests:
 11. No charts, merged data blocks, spacer rows, or hidden helper columns are added.
 12. The output is a new file and the input workbook remains unchanged.
 13. Existing validation tests remain: filename prefix, required tabs, empty Summary,
-    blocked-assignee rejection, and output filename generation.
+  Task/Bug blocked-assignee rejection (including configured email), and output filename
+  generation. Add a fixture proving a Himanshu-assigned PBI and its task rows are
+  excluded.
+14. PBI State is populated from the live read-only API lookup and appears in each Summary
+  row; it must be nonblank.
 
-14. Reference-style colors are represented by named, fixed ARGB constants. Test exact
+15. Reference-style colors are represented by named, fixed ARGB constants. Test exact
    header fills, font colors, borders, and missing-data highlights against those
    constants; do not depend on opening a separate reference workbook at test time.
 
@@ -162,9 +179,10 @@ PBI or Task/Bug IDs.
 
 For every PBI in Summary:
 
-1. **PBI identity and Story Points:** Fetch that exact PBI from Azure DevOps. Verify its
-  type is Product Backlog Item and compare Summary's PBI ID/title and PBI Story Points
-  with the live PBI fields. Check `Microsoft.VSTS.Scheduling.StoryPoints`. If Summary
+1. **PBI identity, State, and Story Points:** Fetch that exact PBI from Azure DevOps.
+  Verify its type is Product Backlog Item and compare Summary's PBI ID/title, PBI State,
+  and PBI Story Points with the live PBI fields. `PBI State` must be nonblank and equal
+  `System.State`. Check `Microsoft.VSTS.Scheduling.StoryPoints`. If Summary
   shows `No_Story_Point`, verify that the live field is actually unset; otherwise check
   the numeric/value match. Report PBI ID, title, Summary value, live value, and field
   name on mismatch.
@@ -200,6 +218,11 @@ For every PBI in Summary:
 10. **Query/team scope:** Re-run each exact query URL embedded in the corresponding team
    tab. Verify each reported PBI is in that team's query results and each child is
    actually a hierarchy child of an included PBI. Do not invent or broaden a query.
+11. **Himanshu-assigned PBI exclusion:** Re-run both team queries, inspect live PBI
+  `System.AssignedTo` display name and `uniqueName`, and identify PBIs matching
+  `HIMANSHU_EMAIL` or the configured display name. No such PBI returned by a query may
+  appear in Summary. If neither query currently returns a
+  matching PBI, mark this check NOT EXECUTED with that reason rather than passing it.
 
 If the PAT is unavailable, a query fails, or the API cannot return required live fields,
 mark the relevant check NOT EXECUTED or INCONCLUSIVE; never report it as passing. Live
@@ -222,14 +245,16 @@ part of the requested Summary design.
 
 ## Implementation sequence
 
-1. Change `CATEGORY_ORDER`/summary headers to the flat 16-column design.
-2. Keep/reuse `read_all_tab()` and `summarize_pbis()` where appropriate; make unknown
+1. Change `CATEGORY_ORDER`/summary headers to the flat 17-column design with PBI State.
+2. Keep/reuse `read_all_tab()` and `summarize_pbis()` where appropriate; fetch PBI State
+  through the Summary utility's read-only API lookup and make unknown
    categories and reconciliation errors explicit.
 3. Rewrite `write_summary_sheet()` to create grouped headers and one row per PBI; remove
    chart creation and chart helper logic/imports/constants.
-4. Preserve workbook validation, blocked-assignee validation, output naming, and
+4. Preserve workbook validation, Task/Bug blocked-assignee validation, output naming, and
    source-file immutability.
-5. Replace chart/layout tests with calculation, format, validation, and no-chart tests.
+5. Replace chart/layout tests with calculation, format, validation, and no-chart tests;
+  test PBI State and prove assigned-PBI exclusion.
 6. Implement the live Azure DevOps tests above using the shared local PAT loader and
   workbook-embedded query URLs. These checks are required when credentials and live
   Azure DevOps are available; they must skip explicitly rather than use fabricated data
