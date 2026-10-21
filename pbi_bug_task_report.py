@@ -73,7 +73,7 @@ EXCLUDED_ASSIGNEE = "Himanshu Pathak"
 # Categorization keyword lists (rule-based). Edit these lists to tune
 # categorization behavior.
 # ---------------------------------------------------------------------------
-QA_KEYWORDS = ["test", "qa", "validation", "verify", "regression"]
+QA_KEYWORDS = ["test", "qa", "regression"]
 REQUIREMENT_KEYWORDS = ["requirement", "analysis", "study", "research", "spec", "investigat"]
 REVIEW_KEYWORDS = ["review", "demo"]
 DESIGN_KEYWORDS = ["design", "document"]

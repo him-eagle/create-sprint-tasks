@@ -138,7 +138,7 @@ PBI_Bug_Task_Report_<Sprint>_<timestamp>.xlsx
 ### 5. Task Categorization (rule-based)
 Same priority-ordered rules as `sprint_tasks_from_queries.py`:
 1. Work item type = **Bug** → `Bug Fixing` (always, regardless of keywords).
-2. Title/Description contains `test`, `qa`, `validation`, `verify`, `regression` →
+2. Title/Description contains `test`, `qa`, `regression` →
    `QA / Testing`.
 3. Title/Description contains `requirement`, `analysis`, `study`, `research`, `spec`,
    `investigat` → `Requirement Study`.
