@@ -91,6 +91,23 @@ def himanshu_email():
     return ""
 
 
+def qa_owners():
+    """Load the expected QA/Testing owners from environment/localconfig without hardcoding names in source."""
+    value = os.environ.get("QA_OWNERS", "").strip()
+    if not value:
+        config_path = os.path.join(SCRIPT_DIR, "localconfig")
+        try:
+            with open(config_path, encoding="utf-8") as config:
+                for line in config:
+                    key, separator, configured = line.partition("=")
+                    if separator and key.strip() == "QA_OWNERS":
+                        value = configured.strip().strip("\"'")
+                        break
+        except OSError:
+            pass
+    return {name.strip() for name in value.split(",") if name.strip()}
+
+
 def is_himanshu_assignee(value, blocked_name=BLOCKED_ASSIGNEE):
     if isinstance(value, dict):
         identifiers = (value.get("displayName", ""), value.get("uniqueName", ""))

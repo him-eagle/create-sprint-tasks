@@ -62,8 +62,8 @@ CHILD_TYPES = {"Task", "Bug"}
 # Categorization keyword lists (rule-based). Edit these lists to tune
 # categorization behavior.
 # ---------------------------------------------------------------------------
-QA_KEYWORDS = ["test", "qa", "validation", "verify", "regression"]
-REQUIREMENT_KEYWORDS = ["requirement", "analysis", "study", "research", "spec", "investigat"]
+QA_KEYWORDS = ["test", "qa", "regression"]
+REQUIREMENT_KEYWORDS = ["requirement", "analysis", "study", "research", "spec", "investigat", "validation"]
 REVIEW_KEYWORDS = ["review", "demo"]
 DESIGN_KEYWORDS = ["design", "document"]
 

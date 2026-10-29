@@ -74,7 +74,7 @@ EXCLUDED_ASSIGNEE = "Himanshu Pathak"
 # categorization behavior.
 # ---------------------------------------------------------------------------
 QA_KEYWORDS = ["test", "qa", "regression"]
-REQUIREMENT_KEYWORDS = ["requirement", "analysis", "study", "research", "spec", "investigat"]
+REQUIREMENT_KEYWORDS = ["requirement", "analysis", "study", "research", "spec", "investigat", "scope"]
 REVIEW_KEYWORDS = ["review", "demo"]
 DESIGN_KEYWORDS = ["design", "document"]
 
@@ -138,6 +138,25 @@ def load_pat_token():
         pass
 
     return ""
+
+
+def qa_owners():
+    """Load the expected QA/Testing owners from environment/localconfig without hardcoding names in source."""
+    value = os.environ.get("QA_OWNERS", "").strip()
+    if not value:
+        env_path = os.path.join(SCRIPT_DIR, "localconfig")
+        try:
+            with open(env_path, encoding="utf-8") as env_file:
+                for line in env_file:
+                    key, separator, configured = line.partition("=")
+                    if separator and key.strip() == "QA_OWNERS":
+                        value = configured.strip()
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                            value = value[1:-1].strip()
+                        break
+        except OSError:
+            pass
+    return {name.strip() for name in value.split(",") if name.strip()}
 
 
 def check_response(resp, context):

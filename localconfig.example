@@ -1,3 +1,6 @@
 # Copy this file to localconfig and replace the placeholder with your Azure DevOps PAT.
 AZURE_DEVOPS_PAT=replace-with-your-pat
 HIMANSHU_EMAIL=your-email@example.org
+
+# Comma-separated list of engineers expected to own "QA / Testing" categorized work.
+QA_OWNERS=QA Engineer One,QA Engineer Two

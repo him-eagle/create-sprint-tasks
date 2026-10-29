@@ -17,17 +17,78 @@ import pbi_bug_task_summary as summary
 REPORT_DIR = Path(summary.OUTPUT_DIR)
 TEAM_TABS = ("FPSO", "Foundation")
 
+QA_TESTING_CATEGORY = "QA / Testing"
+
+_ANSI_RED = "\033[91m"
+_ANSI_RESET = "\033[0m"
+
+
+def _red(text):
+    """Wrap text in ANSI red so QA-owner violations stand out in terminal output."""
+    return f"{_ANSI_RED}{text}{_ANSI_RESET}"
+
+
+_SELECTED_SUMMARY_PATH = "__not_chosen__"
+
+
+def _prompt_for_summary_report(candidates):
+    """Ask which Summary workbook these tests should validate against.
+
+    Always prompts, even when no file was auto-discovered in REPORT_DIR --
+    the user can pick one of the listed candidates (newest-first by
+    modification time) or type a full path to the actual live file, rather
+    than the tests silently trusting mtime or giving up because the file
+    lives somewhere other than REPORT_DIR.
+    """
+    if candidates:
+        print(f"\nSummary workbooks found in {REPORT_DIR}:")
+        for index, path in enumerate(candidates, 1):
+            print(f"  [{index}] {path.name}")
+        hint = f"1-{len(candidates)}, Enter for newest, or a full path"
+    else:
+        print(f"\nNo Summary workbooks auto-discovered in {REPORT_DIR}.")
+        hint = "a full path to the Summary workbook .xlsx to validate"
+
+    while True:
+        try:
+            choice = input(f"Which Summary workbook should these tests validate? [{hint}]: ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            return candidates[0] if candidates else None
+        if choice.isdigit():
+            index = int(choice)
+            if candidates and 1 <= index <= len(candidates):
+                return candidates[index - 1]
+            print(f"Invalid selection '{choice}'.")
+            continue
+        if len(choice) >= 2 and choice[0] == choice[-1] and choice[0] in "\"'":
+            choice = choice[1:-1]
+        path = Path(choice)
+        if path.is_file():
+            return path
+        print(f"File not found: {path}")
+
 
 def _latest_summary_report_path():
-    if not REPORT_DIR.exists():
-        return None
-    reports = sorted(
-        (path for path in REPORT_DIR.glob("PBI_Bug_Task_Report_*_Summary_*.xlsx")
-         if not path.name.startswith("~$")),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    return reports[0] if reports else None
+    """Return the Summary workbook the user selects to validate against, or
+    None. The user is always prompted once per test run; the choice is
+    cached so both "Latest..." test classes below use the same file.
+    """
+    global _SELECTED_SUMMARY_PATH
+    if _SELECTED_SUMMARY_PATH != "__not_chosen__":
+        return _SELECTED_SUMMARY_PATH
+
+    reports = []
+    if REPORT_DIR.exists():
+        reports = sorted(
+            (path for path in REPORT_DIR.glob("PBI_Bug_Task_Report_*_Summary_*.xlsx")
+             if not path.name.startswith("~$")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    _SELECTED_SUMMARY_PATH = _prompt_for_summary_report(reports)
+    return _SELECTED_SUMMARY_PATH
 
 
 def _has_pbi_state_summary(path):
@@ -122,6 +183,29 @@ def _percentage_col(category):
 def _parse_work_item_url(url):
     match = re.search(r"dev\.azure\.com/([^/]+)/([^/]+)/_workitems/edit/(\d+)", url or "")
     return match.groups() if match else None
+
+
+def _format_failures(failures):
+    """Render failure dicts one per line, showing which tab/row each came from."""
+    if not failures:
+        return "(no failures)"
+    lines = []
+    for failure in failures:
+        if isinstance(failure, dict):
+            location_bits = []
+            if failure.get("tab") is not None:
+                location_bits.append(f"tab={failure['tab']}")
+            if failure.get("row") is not None:
+                location_bits.append(f"row={failure['row']}")
+            location = f"[{', '.join(location_bits)}] " if location_bits else ""
+            details = ", ".join(
+                f"{key}={value!r}" for key, value in failure.items()
+                if key not in ("tab", "row")
+            )
+            lines.append(f"{location}{details}")
+        else:
+            lines.append(repr(failure))
+    return "\n" + "\n".join(lines)
 
 
 class FilenameAndWorkbookValidationTests(unittest.TestCase):
@@ -405,17 +489,42 @@ class LatestSummaryStructureTests(unittest.TestCase):
         self.assertEqual([ws.cell(2, c).value for c in range(1, 18)], summary.SUMMARY_HEADERS)
         all_rows = summary.read_all_tab(self.workbook)
         expected = summary.summarize_pbis(all_rows)
-        self.assertEqual(ws.max_row, 2 + len(expected))
+
+        actual_ids = [ws.cell(r, 1).value for r in range(3, ws.max_row + 1)]
+        expected_ids = [pbi["pbi_id"] for pbi in expected]
+        diagnostics = (
+            f"report_path={self.report_path}; "
+            f"Summary data rows={ws.max_row - 2} (ws.max_row={ws.max_row}); "
+            f"summarize_pbis(all_rows) PBI count={len(expected)}; "
+            f"All-tab rows={len(all_rows)}, unique PBI IDs in All tab="
+            f"{len({row['pbi_id'] for row in all_rows})}; "
+            f"Summary rows with a blank PBI ID (row numbers)="
+            f"{[r for r, pid in zip(range(3, ws.max_row + 1), actual_ids) if pid is None]}; "
+            f"duplicate PBI IDs within Summary tab="
+            f"{sorted({pid for pid in actual_ids if pid is not None and actual_ids.count(pid) > 1}, key=str)}; "
+            f"PBI IDs present in Summary but not expected from All tab="
+            f"{sorted(set(filter(None, actual_ids)) - set(expected_ids), key=str)}; "
+            f"PBI IDs expected from All tab but missing from Summary="
+            f"{sorted(set(expected_ids) - set(actual_ids), key=str)}"
+        )
+        self.assertEqual(ws.max_row, 2 + len(expected), diagnostics)
         cols = _summary_map(ws)
         for row_num, pbi in enumerate(expected, start=3):
-            self.assertEqual(ws.cell(row_num, cols["PBI ID"]).value, pbi["pbi_id"])
-            self.assertAlmostEqual(float(re.match(r"^[\d.]+", str(ws.cell(row_num, 5).value)).group()),
-                                   pbi["total_hours"])
+            self.assertEqual(ws.cell(row_num, cols["PBI ID"]).value, pbi["pbi_id"],
+                              f"PBI ID mismatch at Summary row {row_num} (report_path={self.report_path})")
+            self.assertAlmostEqual(
+                float(re.match(r"^[\d.]+", str(ws.cell(row_num, 5).value)).group()),
+                pbi["total_hours"],
+                msg=f"Total Hours mismatch for PBI {pbi['pbi_id']} at Summary row {row_num}")
             for category in summary.CATEGORY_ORDER:
-                self.assertAlmostEqual(ws.cell(row_num, _effort_col(category)).value,
-                                       pbi["category_hours"][category])
-                self.assertAlmostEqual(ws.cell(row_num, _percentage_col(category)).value,
-                                       pbi["category_percentages"][category])
+                self.assertAlmostEqual(
+                    ws.cell(row_num, _effort_col(category)).value,
+                    pbi["category_hours"][category],
+                    msg=f"{category!r} hours mismatch for PBI {pbi['pbi_id']} at Summary row {row_num}")
+                self.assertAlmostEqual(
+                    ws.cell(row_num, _percentage_col(category)).value,
+                    pbi["category_percentages"][category],
+                    msg=f"{category!r} percentage mismatch for PBI {pbi['pbi_id']} at Summary row {row_num}")
 
     def test_latest_summary_has_no_charts_or_data_merges(self):
         ws = self.workbook["Summary"]
@@ -424,15 +533,61 @@ class LatestSummaryStructureTests(unittest.TestCase):
 
     def test_latest_summary_colors_and_missing_values(self):
         ws = self.workbook["Summary"]
-        self.assertTrue(ws["A2"].font.bold)
-        self.assertIsNone(ws["A2"].fill.fill_type)
-        self.assertIsNone(ws["A3"].fill.fill_type)
-        self.assertIsNone(ws["A2"].border.bottom.style)
+        self.assertTrue(ws["A2"].font.bold, "[tab=Summary, row=2] header row must be bold")
+        self.assertIsNone(ws["A2"].fill.fill_type, "[tab=Summary, row=2] header row must not be filled")
+        self.assertIsNone(ws["A3"].fill.fill_type, "[tab=Summary, row=3] first data row must not be filled")
+        self.assertIsNone(ws["A2"].border.bottom.style,
+                          "[tab=Summary, row=2] header row must not have a bottom border")
         for row in range(3, ws.max_row + 1):
             if ws.cell(row, 4).value == summary.NO_STORY_POINT_PLACEHOLDER:
-                self.assertEqual(ws.cell(row, 4).fill.fgColor.rgb, "FFFFFF00")
+                self.assertEqual(ws.cell(row, 4).fill.fgColor.rgb, "FFFFFF00",
+                                  f"[tab=Summary, row={row}] No_Story_Point placeholder must be highlighted yellow")
             if isinstance(ws.cell(row, 5).value, str) and summary.MISSING_HOURS_NOTE in ws.cell(row, 5).value:
-                self.assertEqual(ws.cell(row, 5).fill.fgColor.rgb, "FFFFFF00")
+                self.assertEqual(ws.cell(row, 5).fill.fgColor.rgb, "FFFFFF00",
+                                  f"[tab=Summary, row={row}] missing-hours note must be highlighted yellow")
+
+    def test_qa_testing_tasks_are_owned_by_expected_qa_engineers(self):
+        """Every Task/Bug categorized "QA / Testing" in the All tab must be
+        assigned to one of the dedicated QA engineers (Hanumanth Sunkara or
+        Salina Hamal). Anything else is a red flag for mis-categorization --
+        e.g. Task 39082 ("Identify Areas of Investigation in Code"), which
+        was wrongly bucketed into "QA / Testing" because its description
+        happened to mention "test"/"testing", despite being owned by Jon
+        Nance and actually being requirement-study work.
+        """
+        expected_owners = summary.qa_owners()
+        self.assertTrue(expected_owners, "QA_OWNERS must be set in localconfig or the environment")
+
+        ws = self.workbook["All"]
+        cols = _header_map(ws)
+        violations = []
+        for row_idx in range(3, ws.max_row + 1):
+            if ws.cell(row_idx, cols["Task Categorization"]).value != QA_TESTING_CATEGORY:
+                continue
+            owner = ws.cell(row_idx, cols["Assigned To"]).value
+            if owner in expected_owners:
+                continue
+            violations.append({
+                "pbi_id": ws.cell(row_idx, cols["PBI ID"]).value,
+                "task_id": ws.cell(row_idx, cols["Task ID"]).value,
+                "task_title": ws.cell(row_idx, cols["Task Title"]).value,
+                "owner": owner,
+            })
+
+        if violations:
+            lines = "\n".join(
+                f"  - PBI {v['pbi_id']}, Task/Bug {v['task_id']} ({v['task_title']}): "
+                f"owner={v['owner']!r}"
+                for v in violations
+            )
+            print(_red(
+                f"\nFound {len(violations)} task(s) categorized {QA_TESTING_CATEGORY!r} "
+                f"whose owner is not one of {sorted(expected_owners)}:\n{lines}"
+            ))
+        self.assertFalse(violations, _red(
+            f"{len(violations)} {QA_TESTING_CATEGORY!r} task(s) owned by someone other than "
+            f"{sorted(expected_owners)}; see printed list above (report_path={self.report_path})."
+        ))
 
 
 class LatestSummaryLiveApiTests(unittest.TestCase):
@@ -503,17 +658,20 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
             live_item = self.live_by_pbi[pbi_id]["item"]
             live = live_item.get("fields", {})
             if live.get("System.WorkItemType") != "Product Backlog Item":
-                failures.append((pbi_id, "Work Item Type", live.get("System.WorkItemType"),
-                                 "Product Backlog Item"))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "Work Item Type", "actual": live.get("System.WorkItemType"),
+                                  "expected": "Product Backlog Item"})
             summary_title = ws.cell(row_num, 2).value
             live_title = live.get("System.Title")
             if summary_title != live_title:
-                failures.append((pbi_id, "PBI Title", summary_title, live_title))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "PBI Title", "actual": summary_title, "expected": live_title})
             expected = report.format_story_points(live.get(report.STORY_POINTS_FIELD))
             actual = ws.cell(row_num, 4).value
             if actual != expected:
-                failures.append((pbi_id, "Story Points", actual, expected))
-        self.assertFalse(failures, f"Summary PBI fields differ from live PBIs: {failures}")
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "Story Points", "actual": actual, "expected": expected})
+        self.assertFalse(failures, f"Summary PBI fields differ from live PBIs: {_format_failures(failures)}")
 
     def test_every_summary_pbi_has_state_matching_live_azure_devops(self):
         ws = self.workbook["Summary"]
@@ -522,16 +680,19 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
             actual_state = ws.cell(row_num, 3).value
             live_state = self.live_by_pbi[pbi_id]["item"].get("fields", {}).get("System.State")
             if not actual_state:
-                failures.append((pbi_id, "PBI State is blank", actual_state, live_state))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "issue": "PBI State is blank", "actual": actual_state, "live": live_state})
             elif actual_state != live_state:
-                failures.append((pbi_id, "PBI State mismatch", actual_state, live_state))
-        self.assertFalse(failures, f"Summary PBI State differs from live Azure DevOps: {failures}")
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "issue": "PBI State mismatch", "actual": actual_state, "live": live_state})
+        self.assertFalse(failures, f"Summary PBI State differs from live Azure DevOps: {_format_failures(failures)}")
 
     def test_live_query_pbIs_assigned_to_himanshu_are_excluded_from_summary(self):
         """Any PBI assigned to Himanshu in the live team query results must
         not appear in the generated Summary, matching email or display name.
         """
-        summary_ids = set(self._summary_row_map())
+        summary_row_map = self._summary_row_map()
+        summary_ids = set(summary_row_map)
         assigned_pbi_ids = set()
         failures = []
         for team in TEAM_TABS:
@@ -546,7 +707,8 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
                 pbi_id = pbi["id"]
                 assigned_pbi_ids.add(pbi_id)
                 if pbi_id in summary_ids:
-                    failures.append((team, pbi_id, "Himanshu-assigned PBI present in Summary"))
+                    failures.append({"tab": "Summary", "row": summary_row_map[pbi_id], "team": team,
+                                      "pbi_id": pbi_id, "issue": "Himanshu-assigned PBI present in Summary"})
 
         if not assigned_pbi_ids:
             self.skipTest(
@@ -556,15 +718,17 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
         self.assertFalse(
             failures,
             f"Live PBIs assigned to Himanshu were not excluded from Summary: "
-            f"{failures}; live matching PBI IDs={sorted(assigned_pbi_ids)}",
+            f"{_format_failures(failures)}; live matching PBI IDs={sorted(assigned_pbi_ids)}",
         )
 
     def test_summary_pbis_are_returned_by_their_team_queries(self):
         failures = []
+        summary_row_map = self._summary_row_map()
         for pbi_id, team in self.team_by_pbi.items():
             if team not in self.query_ids_by_team or pbi_id not in self.query_ids_by_team[team]:
-                failures.append((pbi_id, team, "PBI absent from embedded team query result"))
-        self.assertFalse(failures, f"PBI query-scope mismatches: {failures}")
+                failures.append({"tab": "Summary", "row": summary_row_map.get(pbi_id), "team": team,
+                                  "pbi_id": pbi_id, "issue": "PBI absent from embedded team query result"})
+        self.assertFalse(failures, f"PBI query-scope mismatches: {_format_failures(failures)}")
 
     def test_live_child_inventory_hours_categories_and_missing_hours_match(self):
         ws = self.workbook["Summary"]
@@ -579,10 +743,13 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
         failures = []
         for pbi in self.pbi_rows:
             pbi_id = pbi["pbi_id"]
+            row_num = row_map[pbi_id]
             live_children = self.live_by_pbi[pbi_id]["children"]
             live_ids = {child["id"] for child in live_children}
             if live_ids != all_task_ids_by_pbi.get(pbi_id, set()):
-                failures.append((pbi_id, "child IDs", sorted(live_ids), sorted(all_task_ids_by_pbi.get(pbi_id, set()))))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "child IDs", "live": sorted(live_ids),
+                                  "source": sorted(all_task_ids_by_pbi.get(pbi_id, set()))})
 
             total = 0.0
             missing_ids = []
@@ -618,25 +785,31 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
                     )
                 by_category[category] += hours
 
-            row_num = row_map[pbi_id]
             summary_total_raw = ws.cell(row_num, 5).value
             total_text = str(summary_total_raw)
             match = re.match(r"^([\d.]+)", total_text)
             summary_total = float(match.group(1)) if match else None
             if summary_total is None or abs(summary_total - total) > 0.01:
-                failures.append((pbi_id, "Total Hours", summary_total_raw, total))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "Total Hours", "actual": summary_total_raw, "expected": total})
             has_missing_note = summary.MISSING_HOURS_NOTE in total_text
             if bool(missing_ids) != has_missing_note:
-                failures.append((pbi_id, "missing-hours annotation", missing_ids, summary_total_raw))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "missing-hours annotation", "missing_task_ids": missing_ids,
+                                  "total_cell": summary_total_raw})
             if missing_task_value_mismatches:
-                failures.append((pbi_id, "task-level missing-hours mismatch",
-                                 missing_task_value_mismatches))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "task-level missing-hours mismatch",
+                                  "mismatches": missing_task_value_mismatches})
             if missing_ids:
                 if ws.cell(row_num, 5).fill.fgColor.rgb != "FFFFFF00":
-                    failures.append((pbi_id, "missing-hours total is not highlighted yellow", missing_ids))
+                    failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                      "field": "missing-hours total is not highlighted yellow",
+                                      "missing_task_ids": missing_ids})
             if task_category_mismatches:
-                failures.append((pbi_id, "task-level categorization mismatch",
-                                 task_category_mismatches))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "task-level categorization mismatch",
+                                  "mismatches": task_category_mismatches})
             for offset, category in enumerate(summary.CATEGORY_ORDER):
                 effort_col = 6 + offset
                 percent_col = 12 + offset
@@ -644,15 +817,22 @@ class LatestSummaryLiveApiTests(unittest.TestCase):
                 actual_percent = ws.cell(row_num, percent_col).value
                 expected_percent = by_category[category] * 100.0 / total if total else 0.0
                 if actual_effort is None or abs(float(actual_effort) - by_category[category]) > 0.01:
-                    failures.append((pbi_id, category, "effort", actual_effort, by_category[category]))
+                    failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                      "field": f"{category} effort", "actual": actual_effort,
+                                      "expected": by_category[category]})
                 if actual_percent is None or abs(float(actual_percent) - expected_percent) > 0.11:
-                    failures.append((pbi_id, category, "percentage", actual_percent, expected_percent))
+                    failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                      "field": f"{category} percentage", "actual": actual_percent,
+                                      "expected": expected_percent})
             if abs(sum(by_category.values()) - total) > 0.01:
-                failures.append((pbi_id, "live category/total reconciliation", sum(by_category.values()), total))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "live category/total reconciliation",
+                                  "category_sum": sum(by_category.values()), "total": total})
             if total and abs(sum(by_category.values()) * 100 / total - 100) > 0.01:
-                failures.append((pbi_id, "live percentages do not total 100%"))
+                failures.append({"tab": "Summary", "row": row_num, "pbi_id": pbi_id,
+                                  "field": "live percentages do not total 100%"})
 
-        self.assertFalse(failures, f"Live PBI/child summary validation failures:\n{failures}")
+        self.assertFalse(failures, f"Live PBI/child summary validation failures:{_format_failures(failures)}")
 
 
 if __name__ == "__main__":

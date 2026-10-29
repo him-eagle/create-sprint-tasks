@@ -31,25 +31,84 @@ import pbi_bug_task_report as report
 REPORT_DIR = Path(report.OUTPUT_DIR)
 TEAM_TABS = {"FPSO", "Foundation"}
 
+QA_TESTING_CATEGORY = "QA / Testing"
+
+_ANSI_RED = "\033[91m"
+_ANSI_RESET = "\033[0m"
+
+
+def _red(text):
+    """Wrap text in ANSI red so QA-owner violations stand out in terminal output."""
+    return f"{_ANSI_RED}{text}{_ANSI_RESET}"
+
+
+_SELECTED_REPORT_PATH = "__not_chosen__"
+
+
+def _prompt_for_report(candidates):
+    """Ask which report these tests should validate against.
+
+    Always prompts, even when no file was auto-discovered in REPORT_DIR --
+    the user can pick one of the listed candidates (newest-first by
+    modification time) or type a full path to the actual live file, rather
+    than the tests silently trusting mtime or giving up because the file
+    lives somewhere other than REPORT_DIR.
+    """
+    if candidates:
+        print(f"\nReports found in {REPORT_DIR}:")
+        for index, path in enumerate(candidates, 1):
+            print(f"  [{index}] {path.name}")
+        hint = f"1-{len(candidates)}, Enter for newest, or a full path"
+    else:
+        print(f"\nNo reports auto-discovered in {REPORT_DIR}.")
+        hint = "a full path to the report .xlsx to validate"
+
+    while True:
+        try:
+            choice = input(f"Which report should these tests validate? [{hint}]: ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            return candidates[0] if candidates else None
+        if choice.isdigit():
+            index = int(choice)
+            if candidates and 1 <= index <= len(candidates):
+                return candidates[index - 1]
+            print(f"Invalid selection '{choice}'.")
+            continue
+        if len(choice) >= 2 and choice[0] == choice[-1] and choice[0] in "\"'":
+            choice = choice[1:-1]
+        path = Path(choice)
+        if path.is_file():
+            return path
+        print(f"File not found: {path}")
+
 
 def _latest_report_path():
-    """Return the most recently modified generated report, or None.
+    """Return the report the user selects to validate against, or None.
 
     Excludes "_Summary_" workbooks -- those are produced by the separate
     pbi_bug_task_summary.py script (which fills in the Summary tab) and are
-    not a report this script itself generated.
+    not a report this script itself generated. The user is always prompted
+    once per test run; the choice is cached so both "Latest..." test classes
+    below use the same file.
     """
-    if not REPORT_DIR.exists():
-        return None
-    reports = sorted(
-        (
-            p for p in REPORT_DIR.glob("PBI_Bug_Task_Report_*.xlsx")
-            if not p.name.startswith("~$") and "_Summary_" not in p.name
-        ),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return reports[0] if reports else None
+    global _SELECTED_REPORT_PATH
+    if _SELECTED_REPORT_PATH != "__not_chosen__":
+        return _SELECTED_REPORT_PATH
+
+    reports = []
+    if REPORT_DIR.exists():
+        reports = sorted(
+            (
+                p for p in REPORT_DIR.glob("PBI_Bug_Task_Report_*.xlsx")
+                if not p.name.startswith("~$") and "_Summary_" not in p.name
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    _SELECTED_REPORT_PATH = _prompt_for_report(reports)
+    return _SELECTED_REPORT_PATH
 
 
 def _header_index(rows):
@@ -59,6 +118,29 @@ def _header_index(rows):
 def _normalize_assignee(value):
     """Normalize case and whitespace so casing/spacing variants compare equally."""
     return "".join(str(value or "").split()).casefold()
+
+
+def _format_failures(failures):
+    """Render failure dicts one per line, showing which tab/row each came from."""
+    if not failures:
+        return "(no failures)"
+    lines = []
+    for failure in failures:
+        if isinstance(failure, dict):
+            location_bits = []
+            if failure.get("tab") is not None:
+                location_bits.append(f"tab={failure['tab']}")
+            if failure.get("row") is not None:
+                location_bits.append(f"row={failure['row']}")
+            location = f"[{', '.join(location_bits)}] " if location_bits else ""
+            details = ", ".join(
+                f"{key}={value!r}" for key, value in failure.items()
+                if key not in ("tab", "row")
+            )
+            lines.append(f"{location}{details}")
+        else:
+            lines.append(repr(failure))
+    return "\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +159,26 @@ class CategorizationTests(unittest.TestCase):
         self.assertEqual(report.categorize_task("Task", "PR-Review", ""), "Review")
         self.assertEqual(report.categorize_task("Task", "Code Review", ""), "Review")
         self.assertEqual(report.categorize_task("Task", "Demo Task", ""), "Review")
+
+    def test_scope_tasks_are_requirement_study(self):
+        """A Task whose title mentions "scope" must be categorized as
+        "Requirement Study", even when its description also contains
+        "review" keywords -- Requirement keywords outrank Review keywords.
+
+        Example: Task 39083 "2.5 - Scope and Effort Check-In" with
+        description "After initial design review and code review, we
+        should pool the findings and present them to a lead to determine
+        in/out of scope items." must come back as "Requirement Study", not
+        "Review", despite "review" appearing twice in the description.
+        """
+        self.assertEqual(
+            report.categorize_task("Task", "2.5 - Scope and Effort Check-In",
+                                    "After initial design review and code review, we should "
+                                    "pool the findings and present them to a lead to "
+                                    "determine in/out of scope items."),
+            "Requirement Study",
+        )
+        self.assertEqual(report.categorize_task("Task", "Scope Definition", ""), "Requirement Study")
 
     def test_bugs_keep_bug_fixing_priority(self):
         """Work item type "Bug" always categorizes as "Bug Fixing", regardless
@@ -505,7 +607,8 @@ class LatestReportStructureTests(unittest.TestCase):
         header_index = _header_index(rows)
         headers = rows[header_index]
         col = {name: headers.index(name) for name in headers if name}
-        return rows[header_index + 1:], col
+        data_rows = list(enumerate(rows[header_index + 1:], start=header_index + 2))
+        return data_rows, col
 
     def test_tab_order_and_summary_is_empty(self):
         """The newest generated report must list "Summary" then "All" as
@@ -537,11 +640,11 @@ class LatestReportStructureTests(unittest.TestCase):
             if team not in self.workbook.sheetnames:
                 continue
             data_rows, col = self._team_table(team)
-            for row in data_rows:
+            for row_num, row in data_rows:
                 pbi_id = row[col["PBI ID"]]
                 if pbi_id is None:
                     continue
-                self.assertEqual(row[col["Team"]], team)
+                self.assertEqual(row[col["Team"]], team, f"[tab={team}, row={row_num}] Team column mismatch")
                 pbi_teams.setdefault(pbi_id, set()).add(team)
 
         duplicates = {pbi: teams for pbi, teams in pbi_teams.items() if len(teams) > 1}
@@ -562,13 +665,21 @@ class LatestReportStructureTests(unittest.TestCase):
             if team not in self.workbook.sheetnames:
                 continue
             data_rows, col = self._team_table(team)
-            for row in data_rows:
+            for row_num, row in data_rows:
                 if row[col["Task Type"]] == "Bug" and row[col["Task Categorization"]] != "Bug Fixing":
-                    failures.append((team, row[col["PBI ID"]], row[col["Task ID"]], "Bug", row[col["Task Categorization"]]))
+                    failures.append({
+                        "tab": team, "row": row_num,
+                        "pbi_id": row[col["PBI ID"]], "task_id": row[col["Task ID"]],
+                        "kind": "Bug", "actual_categorization": row[col["Task Categorization"]],
+                    })
                 title = (row[col["Task Title"]] or "")
                 if "demo" in title.lower() and row[col["Task Categorization"]] != "Review":
-                    failures.append((team, row[col["PBI ID"]], row[col["Task ID"]], "Demo", row[col["Task Categorization"]]))
-        self.assertFalse(failures, f"Mis-categorized rows (team, pbi, task, kind, actual): {failures}")
+                    failures.append({
+                        "tab": team, "row": row_num,
+                        "pbi_id": row[col["PBI ID"]], "task_id": row[col["Task ID"]],
+                        "kind": "Demo", "actual_categorization": row[col["Task Categorization"]],
+                    })
+        self.assertFalse(failures, f"Mis-categorized rows: {_format_failures(failures)}")
 
     def test_himanshu_pathak_is_not_assigned_in_any_report_tab(self):
         """No data row on any report tab may be assigned to Himanshu Pathak.
@@ -594,13 +705,14 @@ class LatestReportStructureTests(unittest.TestCase):
 
             headers = rows[header_index]
             col = {name: headers.index(name) for name in headers if name}
-            for row in rows[header_index + 1:]:
+            for row_num, row in enumerate(rows[header_index + 1:], start=header_index + 2):
                 assigned_to = row[col["Assigned To"]]
                 if _normalize_assignee(assigned_to) != _normalize_assignee("Himanshu Pathak"):
                     continue
                 failures.append(
                     {
                         "tab": worksheet.title,
+                        "row": row_num,
                         "pbi_id": row[col["PBI ID"]] if "PBI ID" in col else None,
                         "task_id": row[col["Task ID"]] if "Task ID" in col else None,
                         "task_title": row[col["Task Title"]] if "Task Title" in col else None,
@@ -610,8 +722,54 @@ class LatestReportStructureTests(unittest.TestCase):
         self.assertFalse(
             failures,
             f"Report '{self.report_path}' assigns one or more items to Himanshu Pathak: "
-            f"{failures}",
+            f"{_format_failures(failures)}",
         )
+
+    def test_qa_testing_tasks_are_owned_by_expected_qa_engineers(self):
+        """Every Task/Bug categorized "QA / Testing" in the All tab must be
+        assigned to one of the dedicated QA engineers (Hanumanth Sunkara or
+        Salina Hamal). Anything else is a red flag for mis-categorization --
+        e.g. Task 39082 ("Identify Areas of Investigation in Code"), which
+        was wrongly bucketed into "QA / Testing" because its description
+        happened to mention "test"/"testing", despite being owned by Jon
+        Nance and actually being requirement-study work.
+        """
+        expected_owners = report.qa_owners()
+        self.assertTrue(expected_owners, "QA_OWNERS must be set in localconfig or the environment")
+
+        rows = list(self.workbook["All"].iter_rows(values_only=True))
+        header_index = _header_index(rows)
+        headers = rows[header_index]
+        col = {name: headers.index(name) for name in headers if name}
+
+        violations = []
+        for row in rows[header_index + 1:]:
+            if row[col["Task Categorization"]] != QA_TESTING_CATEGORY:
+                continue
+            owner = row[col["Assigned To"]]
+            if owner in expected_owners:
+                continue
+            violations.append({
+                "pbi_id": row[col["PBI ID"]],
+                "task_id": row[col["Task ID"]],
+                "task_title": row[col["Task Title"]],
+                "owner": owner,
+            })
+
+        if violations:
+            lines = "\n".join(
+                f"  - PBI {v['pbi_id']}, Task/Bug {v['task_id']} ({v['task_title']}): "
+                f"owner={v['owner']!r}"
+                for v in violations
+            )
+            print(_red(
+                f"\nFound {len(violations)} task(s) categorized {QA_TESTING_CATEGORY!r} "
+                f"whose owner is not one of {sorted(expected_owners)}:\n{lines}"
+            ))
+        self.assertFalse(violations, _red(
+            f"{len(violations)} {QA_TESTING_CATEGORY!r} task(s) owned by someone other than "
+            f"{sorted(expected_owners)}; see printed list above (report_path={self.report_path})."
+        ))
 
     def test_placeholders_never_left_blank(self):
         """Every data row's PBI Story Points column must carry either a real
@@ -629,16 +787,18 @@ class LatestReportStructureTests(unittest.TestCase):
             if team not in self.workbook.sheetnames:
                 continue
             data_rows, col = self._team_table(team)
-            for row in data_rows:
+            for row_num, row in data_rows:
                 sp = row[col["PBI Story Points"]]
                 if sp is None or sp == "":
-                    failures.append((team, row[col["PBI ID"]], "PBI Story Points", sp))
+                    failures.append({"tab": team, "row": row_num, "pbi_id": row[col["PBI ID"]],
+                                      "field": "PBI Story Points", "value": sp})
                 if row[col["Task ID"]] is not None:
                     for field in ("Original Estimate (hrs)", "Completed Work (hrs)"):
                         value = row[col[field]]
                         if value is None or value == "":
-                            failures.append((team, row[col["Task ID"]], field, value))
-        self.assertFalse(failures, f"Blank fields that should carry a placeholder: {failures}")
+                            failures.append({"tab": team, "row": row_num, "task_id": row[col["Task ID"]],
+                                              "field": field, "value": value})
+        self.assertFalse(failures, f"Blank fields that should carry a placeholder: {_format_failures(failures)}")
 
     def test_all_tab_row_count_matches_team_tabs(self):
         """The number of data rows in the combined "All" tab must exactly
@@ -684,12 +844,14 @@ class LatestReportStructureTests(unittest.TestCase):
                 pbi_cell = row_cells[col["PBI ID"]]
                 if pbi_cell.value is not None and pbi_cell.hyperlink:
                     expected = report.build_work_item_url(org, project, pbi_cell.value)
-                    self.assertEqual(pbi_cell.hyperlink.target, expected)
+                    self.assertEqual(pbi_cell.hyperlink.target, expected,
+                                      f"[tab={team}, row={pbi_cell.row}] PBI ID hyperlink mismatch")
                     checked_any = True
                 task_cell = row_cells[col["Task ID"]]
                 if task_cell.value is not None and task_cell.hyperlink:
                     expected = report.build_work_item_url(org, project, task_cell.value)
-                    self.assertEqual(task_cell.hyperlink.target, expected)
+                    self.assertEqual(task_cell.hyperlink.target, expected,
+                                      f"[tab={team}, row={task_cell.row}] Task ID hyperlink mismatch")
                     checked_any = True
             if not checked_any:
                 self.skipTest(f"No hyperlinked rows found in {team} tab to check")
@@ -731,7 +893,8 @@ class LatestReportLiveApiTests(unittest.TestCase):
         header_index = _header_index(rows)
         headers = rows[header_index]
         col = {name: headers.index(name) for name in headers if name}
-        return rows[header_index + 1:], col
+        data_rows = list(enumerate(rows[header_index + 1:], start=header_index + 2))
+        return data_rows, col
 
     def _expected_state(self, team):
         """Recompute the current expected PBI/Task state for a team straight
@@ -801,22 +964,23 @@ class LatestReportLiveApiTests(unittest.TestCase):
             live_exclusions["children"].update(expected["excluded_child_ids"])
             data_rows, col = self._team_table(team)
 
-            for row in data_rows:
+            for row_num, row in data_rows:
                 pbi_id = row[col["PBI ID"]]
                 task_id = row[col["Task ID"]]
                 if pbi_id in expected["excluded_pbi_ids"]:
-                    failures.append((team, "excluded PBI present", pbi_id))
+                    failures.append({"tab": team, "row": row_num, "issue": "excluded PBI present", "pbi_id": pbi_id})
                 if task_id in expected["excluded_child_ids"]:
-                    failures.append((team, "excluded Task/Bug present", task_id))
+                    failures.append({"tab": team, "row": row_num, "issue": "excluded Task/Bug present", "task_id": task_id})
                 if _normalize_assignee(row[col["Assigned To"]]) == _normalize_assignee(
                     "Himanshu Pathak"
                 ):
-                    failures.append((team, "Himanshu assignment present", pbi_id, task_id))
+                    failures.append({"tab": team, "row": row_num, "issue": "Himanshu assignment present",
+                                      "pbi_id": pbi_id, "task_id": task_id})
 
         self.assertFalse(
             failures,
             "Live Azure DevOps assignments are not properly excluded from the report: "
-            f"{failures}; live excluded item IDs={live_exclusions}",
+            f"{_format_failures(failures)}; live excluded item IDs={live_exclusions}",
         )
 
     def test_parent_child_correspondence_matches_live_api(self):
@@ -838,7 +1002,7 @@ class LatestReportLiveApiTests(unittest.TestCase):
             data_rows, col = self._team_table(team)
 
             actual_mapping = {}
-            for row in data_rows:
+            for _row_num, row in data_rows:
                 pbi_id = row[col["PBI ID"]]
                 task_id = row[col["Task ID"]]
                 actual_mapping.setdefault(pbi_id, set())
@@ -877,11 +1041,11 @@ class LatestReportLiveApiTests(unittest.TestCase):
                 continue
             expected = self._expected_state(team)
             data_rows, col = self._team_table(team)
-            for row in data_rows:
+            for row_num, row in data_rows:
                 pbi_id = row[col["PBI ID"]]
                 if pbi_id is not None and pbi_id not in expected["query_ids"]:
-                    failures.append((team, pbi_id))
-        self.assertFalse(failures, f"PBI IDs not present in their team's live query result: {failures}")
+                    failures.append({"tab": team, "row": row_num, "pbi_id": pbi_id})
+        self.assertFalse(failures, f"PBI IDs not present in their team's live query result: {_format_failures(failures)}")
 
     def test_story_points_and_hours_match_live_api(self):
         """Every PBI Story Points value and every Task/Bug's Original
@@ -901,7 +1065,7 @@ class LatestReportLiveApiTests(unittest.TestCase):
                 continue
             expected = self._expected_state(team)
             data_rows, col = self._team_table(team)
-            for row in data_rows:
+            for row_num, row in data_rows:
                 pbi_id = row[col["PBI ID"]]
                 pbi_fields = expected["fields_by_id"].get(pbi_id, {})
                 expected_sp = report.format_story_points(
@@ -909,7 +1073,8 @@ class LatestReportLiveApiTests(unittest.TestCase):
                 )
                 actual_sp = row[col["PBI Story Points"]]
                 if actual_sp != expected_sp:
-                    failures.append((team, pbi_id, "PBI Story Points", expected_sp, actual_sp))
+                    failures.append({"tab": team, "row": row_num, "pbi_id": pbi_id,
+                                      "field": "PBI Story Points", "expected": expected_sp, "actual": actual_sp})
 
                 task_id = row[col["Task ID"]]
                 if task_id is not None:
@@ -923,14 +1088,15 @@ class LatestReportLiveApiTests(unittest.TestCase):
                     actual_oe = row[col["Original Estimate (hrs)"]]
                     actual_cw = row[col["Completed Work (hrs)"]]
                     if actual_oe != expected_oe:
-                        failures.append((team, task_id, "Original Estimate", expected_oe, actual_oe))
+                        failures.append({"tab": team, "row": row_num, "task_id": task_id,
+                                          "field": "Original Estimate", "expected": expected_oe, "actual": actual_oe})
                     if actual_cw != expected_cw:
-                        failures.append((team, task_id, "Completed Work", expected_cw, actual_cw))
+                        failures.append({"tab": team, "row": row_num, "task_id": task_id,
+                                          "field": "Completed Work", "expected": expected_cw, "actual": actual_cw})
 
         self.assertFalse(
             failures,
-            "Field values do not match the live Azure DevOps API "
-            "(team, id, field, expected, actual):\n" + "\n".join(str(f) for f in failures),
+            "Field values do not match the live Azure DevOps API:" + _format_failures(failures),
         )
 
     def test_every_included_queried_pbi_is_in_the_report_with_matching_count(self):
@@ -953,7 +1119,7 @@ class LatestReportLiveApiTests(unittest.TestCase):
 
             data_rows, col = self._team_table(team)
             actual_pbi_ids = {
-                row[col["PBI ID"]] for row in data_rows if row[col["PBI ID"]] is not None
+                row[col["PBI ID"]] for _row_num, row in data_rows if row[col["PBI ID"]] is not None
             }
 
             missing_from_report = sorted(expected_pbi_ids - actual_pbi_ids)
